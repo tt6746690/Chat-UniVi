@@ -69,6 +69,8 @@ class DataArguments:
     image_grid_pinpoints: Optional[str] = field(default=None)
 
     dataset_use: str = field(default="Pretrain")
+    # wpq
+    train_size: Optional[int] = field(default=None)
 
 
 @dataclass
@@ -765,13 +767,17 @@ class LazySupervisedDataset(Dataset):
         for i in dataset_list:
             list_data_dict += json.load(open(i["chat_path"], "r"))
 
-            image_folder = [folder for folder in i if folder is not "chat_path"]
+            image_folder = [folder for folder in i if folder != "chat_path"]
 
             for folder in image_folder:
                 if folder not in self.folder_dict:
                     self.folder_dict[folder] = i[folder]
 
         random.shuffle(list_data_dict)
+
+        # wpq
+        if data_args.train_size is not None:
+            list_data_dict = list_data_dict[:data_args.train_size]
 
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
@@ -988,6 +994,25 @@ def train():
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
+
+    # wpq: save args to a json file
+    from dataclasses import asdict
+    with training_args.main_process_first(local=False, desc=f"Saving args to `{training_args.output_dir+'.args.json'}`"):
+        os.makedirs(training_args.output_dir, exist_ok=True)
+        args_dict_path = os.path.join(training_args.output_dir, 'args.json')
+        with open(args_dict_path, 'w') as f:
+            model_args_dict = copy.deepcopy(asdict(model_args))
+            model_args_dict['model_use_dict'] = ModelConfig[str(model_args.model_use)]
+            data_args_dict = copy.deepcopy(asdict(data_args))
+            data_args_dict['dataset_use_dict'] = DataConfig[str(data_args.dataset_use)]
+            json.dump({
+                'model_args': model_args_dict,
+                'data_args': data_args_dict,
+                'training_args': asdict(training_args),
+            }, f, indent=4)
+        print(f'Saving args dict to {args_dict_path}')
+        
+
     random.seed(training_args.seed)
     os.environ['PYTHONHASHSEED'] = str(training_args.seed)
     np.random.seed(training_args.seed)
@@ -1036,6 +1061,10 @@ def train():
             **bnb_model_from_pretrained_args
         )
     model.config.use_cache = False
+
+    # wpq: set to default values, otherwise raises `.validate` error on saving.
+    model.generation_config.temperature=1.
+    model.generation_config.top_p=1.
 
     if model_args.freeze_backbone:
         model.model.requires_grad_(False)

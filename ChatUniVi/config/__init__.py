@@ -14,4 +14,6 @@ DataConfig = {
     "FINETUNE": [VIT, MIMIC_imageonly, VIDEO],
     "Pretrainv1.5": [Pretrain, Pretrain_valley_llava],
     "FINETUNEv1.5": [VIT, VIDEO, LLaVA],
+    'valley703k+llavalcs558k': [Pretrain_valley_llava],
+    'vcg100k+llava665k': [VIDEO, LLaVA],
 }
