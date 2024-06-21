@@ -53,7 +53,7 @@ if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
             --conv-mode v1 &
     done
 
-    # wait
+    wait
 
     # generic
     output_file=$CKPT/eval/vcgbench/answers-generic/merge.jsonl
