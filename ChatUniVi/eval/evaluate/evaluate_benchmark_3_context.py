@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--pred_path", required=True, help="The path to file containing prediction.")
     parser.add_argument("--output_dir", required=True, help="The path to save annotation json files.")
     parser.add_argument("--output_json", required=True, help="The path to save annotation final combined json file.")
-    parser.add_argument("--api_key", required=True, help="OpenAI API key.")
+    parser.add_argument("--api_key", default=None, required=False, help="OpenAI API key.")
     parser.add_argument("--num_tasks", required=True, type=int, help="Number of splits.")
     args = parser.parse_args()
     return args
@@ -92,6 +92,17 @@ def annotate(prediction_set, caption_files, output_dir):
                 print(f'RateLimitError: {e}')
                 time.sleep(10)
                 pass
+            except openai.BadRequestError as e:
+                print(f"Error processing file '{key}': {e}")
+                if 'repetitive patterns' in str(e):
+                    print(f"Assign score=0 to current question.")
+                    # Save the question-answer pairs to a json file.
+                    with open(f"{output_dir}/{key}.json", "w") as f:
+                        json.dump([{"score": 0}, qa_set], f)
+                    break
+                else:
+                    print(f"Error processing file '{key}': {e}")
+                    break
             except Exception as e:
                 print(f"Error processing file '{key}': {e}")
                 break

@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument("--pred_path", required=True, help="The path to file containing prediction.")
     parser.add_argument("--output_dir", required=True, help="The path to save annotation json files.")
     parser.add_argument("--output_json", required=True, help="The path to save annotation final combined json file.")
-    parser.add_argument("--api_key", required=True, help="OpenAI API key.")
+    parser.add_argument("--api_key", default=None, required=False, help="OpenAI API key.")
     parser.add_argument("--num_tasks", required=True, type=int, help="Number of splits.")
     args = parser.parse_args()
     return args
