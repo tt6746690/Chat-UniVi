@@ -1,10 +1,15 @@
 import openai
+from openai import OpenAI
 import os
 import argparse
 import json
 import jsonlines
 import ast
 from multiprocessing.pool import Pool
+
+client = OpenAI(
+    api_key=os.environ['OPENAI_API_KEY'],
+)
 
 
 def read_jsonl(file):
@@ -37,49 +42,59 @@ def annotate(prediction_set, caption_files, output_dir):
         question = qa_set['q']
         answer = qa_set['a']
         pred = qa_set['pred']
-        try:
-            # Compute the contextual understanding score
-            completion = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {
-                        "role": "system",
-                        "content":
-                            "You are an intelligent chatbot designed for evaluating the contextual understanding of generative outputs for video-based question-answer pairs. "
-                            "Your task is to compare the predicted answer with the correct answer and determine if the generated response aligns with the overall context of the video content. Here's how you can accomplish the task:"
-                            "------"
-                            "##INSTRUCTIONS: "
-                            "- Evaluate whether the predicted answer aligns with the overall context of the video content. It should not provide information that is out of context or misaligned.\n"
-                            "- The predicted answer must capture the main themes and sentiments of the video.\n"
-                            "- Consider synonyms or paraphrases as valid matches.\n"
-                            "- Provide your evaluation of the contextual understanding of the prediction compared to the answer."
-                    },
-                    {
-                        "role": "user",
-                        "content":
-                            "Please evaluate the following video-based question-answer pair:\n\n"
-                            f"Question: {question}\n"
-                            f"Correct Answer: {answer}\n"
-                            f"Predicted Answer: {pred}\n\n"
-                            "Provide your evaluation only as a contextual understanding score where the contextual understanding score is an integer value between 0 and 5, with 5 indicating the highest level of contextual understanding. "
-                            "Please generate the response in the form of a Python dictionary string with keys 'score', where its value is contextual understanding score in INTEGER, not STRING."
-                            "DO NOT PROVIDE ANY OTHER OUTPUT TEXT OR EXPLANATION. Only provide the Python dictionary string. "
-                            "For example, your response should look like this: {''score': 4.8}."
-                    }
-                ]
-            )
-            # Convert response to a Python dictionary.
-            response_message = completion["choices"][0]["message"]["content"]
-            response_dict = ast.literal_eval(response_message)
-            result_qa_pair = [response_dict, qa_set]
+        while True:
+            try:
+                # Compute the contextual understanding score
+                # wpq: update openai>1.0.0
+                # completion = openai.ChatCompletion.create(
+                completion = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content":
+                                "You are an intelligent chatbot designed for evaluating the contextual understanding of generative outputs for video-based question-answer pairs. "
+                                "Your task is to compare the predicted answer with the correct answer and determine if the generated response aligns with the overall context of the video content. Here's how you can accomplish the task:"
+                                "------"
+                                "##INSTRUCTIONS: "
+                                "- Evaluate whether the predicted answer aligns with the overall context of the video content. It should not provide information that is out of context or misaligned.\n"
+                                "- The predicted answer must capture the main themes and sentiments of the video.\n"
+                                "- Consider synonyms or paraphrases as valid matches.\n"
+                                "- Provide your evaluation of the contextual understanding of the prediction compared to the answer."
+                        },
+                        {
+                            "role": "user",
+                            "content":
+                                "Please evaluate the following video-based question-answer pair:\n\n"
+                                f"Question: {question}\n"
+                                f"Correct Answer: {answer}\n"
+                                f"Predicted Answer: {pred}\n\n"
+                                "Provide your evaluation only as a contextual understanding score where the contextual understanding score is an integer value between 0 and 5, with 5 indicating the highest level of contextual understanding. "
+                                "Please generate the response in the form of a Python dictionary string with keys 'score', where its value is contextual understanding score in INTEGER, not STRING."
+                                "DO NOT PROVIDE ANY OTHER OUTPUT TEXT OR EXPLANATION. Only provide the Python dictionary string. "
+                                "For example, your response should look like this: {''score': 4.8}."
+                        }
+                    ]
+                )
+                # Convert response to a Python dictionary.
+                # response_message = completion["choices"][0]["message"]["content"]
+                response_message = completion.choices[0].message.content
+                response_dict = ast.literal_eval(response_message)
+                result_qa_pair = [response_dict, qa_set]
 
-            # Save the question-answer pairs to a json file.
-            with open(f"{output_dir}/{key}.json", "w") as f:
-                json.dump(result_qa_pair, f)
+                # Save the question-answer pairs to a json file.
+                with open(f"{output_dir}/{key}.json", "w") as f:
+                    json.dump(result_qa_pair, f)
 
-        except Exception as e:
-            print(f"Error processing file '{key}': {e}")
-
+                break
+            except openai.RateLimitError as e:
+                import time
+                print(f'RateLimitError: {e}')
+                time.sleep(10)
+                pass
+            except Exception as e:
+                print(f"Error processing file '{key}': {e}")
+                break
 
 def main():
     """
@@ -132,7 +147,7 @@ def main():
         prediction_set[id] = qa_set
 
     # Set the OpenAI API key.
-    openai.api_key = args.api_key
+    # openai.api_key = args.api_key
     num_tasks = args.num_tasks
 
     # While loop to ensure that all captions are processed.
@@ -193,6 +208,8 @@ def main():
 
     print("Average score for contextual understanding:", average_score * 20)
 
+    with open(os.path.join(output_dir, 'metrics.jsonl'), 'w') as f:
+        json.dump({'score': average_score * 20}, f)
 
 if __name__ == "__main__":
     main()

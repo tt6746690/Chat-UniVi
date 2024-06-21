@@ -1,4 +1,5 @@
 import openai
+from openai import OpenAI
 import os
 import argparse
 import json
@@ -6,6 +7,9 @@ import jsonlines
 import ast
 from multiprocessing.pool import Pool
 
+client = OpenAI(
+    api_key=os.environ['OPENAI_API_KEY'],
+)
 
 def read_jsonl(file):
     results = []
@@ -39,51 +43,62 @@ def annotate(prediction_set, caption_files, output_dir):
         answer = qa_set['a']
         pred1 = qa_set['pred1']
         pred2 = qa_set['pred2']
-        try:
-            # Compute the consistency score
-            completion = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {
-                        "role": "system",
-                        "content":
-                            "You are an intelligent chatbot designed for evaluating the consistency of generative outputs for similar video-based question-answer pairs. "
-                            "You will be given two very similar questions, a common answer common to both the questions and predicted answers for the two questions ."
-                            "Your task is to compare the predicted answers for two very similar question, with a common correct answer and determine if they are consistent. Here's how you can accomplish the task:"
-                            "------"
-                            "##INSTRUCTIONS: "
-                            "- Focus on the consistency between the two predicted answers and the correct answer. Both predicted answers should correspond to the correct answer and to each other, and should not contain any contradictions or significant differences in the conveyed information.\n"
-                            "- Both predicted answers must be consistent with each other and the correct answer, in terms of the information they provide about the video content.\n"
-                            "- Consider synonyms or paraphrases as valid matches, but only if they maintain the consistency in the conveyed information.\n"
-                            "- Evaluate the consistency of the two predicted answers compared to the correct answer."
-                    },
-                    {
-                        "role": "user",
-                        "content":
-                            "Please evaluate the following video-based question-answer pair:\n\n"
-                            f"Question 1: {question1}\n"
-                            f"Question 2: {question2}\n"
-                            f"Correct Answer: {answer}\n"
-                            f"Predicted Answer to Question 1: {pred1}\n"
-                            f"Predicted Answer to Question 2: {pred2}\n\n"
-                            "Provide your evaluation only as a consistency score where the consistency score is an integer value between 0 and 5, with 5 indicating the highest level of consistency. "
-                            "Please generate the response in the form of a Python dictionary string with keys 'score', where its value is the consistency score in INTEGER, not STRING."
-                            "DO NOT PROVIDE ANY OTHER OUTPUT TEXT OR EXPLANATION. Only provide the Python dictionary string. "
-                            "For example, your response should look like this: {''score': 4.8}."
-                    }
-                ],
-            )
-            # Convert response to a Python dictionary.
-            response_message = completion["choices"][0]["message"]["content"]
-            response_dict = ast.literal_eval(response_message)
-            result_qa_pair = [response_dict, qa_set]
+        while True:
+            try:
+                # Compute the consistency score
+                # wpq: update openai>1.0.0
+                # completion = openai.ChatCompletion.create(
+                completion = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content":
+                                "You are an intelligent chatbot designed for evaluating the consistency of generative outputs for similar video-based question-answer pairs. "
+                                "You will be given two very similar questions, a common answer common to both the questions and predicted answers for the two questions ."
+                                "Your task is to compare the predicted answers for two very similar question, with a common correct answer and determine if they are consistent. Here's how you can accomplish the task:"
+                                "------"
+                                "##INSTRUCTIONS: "
+                                "- Focus on the consistency between the two predicted answers and the correct answer. Both predicted answers should correspond to the correct answer and to each other, and should not contain any contradictions or significant differences in the conveyed information.\n"
+                                "- Both predicted answers must be consistent with each other and the correct answer, in terms of the information they provide about the video content.\n"
+                                "- Consider synonyms or paraphrases as valid matches, but only if they maintain the consistency in the conveyed information.\n"
+                                "- Evaluate the consistency of the two predicted answers compared to the correct answer."
+                        },
+                        {
+                            "role": "user",
+                            "content":
+                                "Please evaluate the following video-based question-answer pair:\n\n"
+                                f"Question 1: {question1}\n"
+                                f"Question 2: {question2}\n"
+                                f"Correct Answer: {answer}\n"
+                                f"Predicted Answer to Question 1: {pred1}\n"
+                                f"Predicted Answer to Question 2: {pred2}\n\n"
+                                "Provide your evaluation only as a consistency score where the consistency score is an integer value between 0 and 5, with 5 indicating the highest level of consistency. "
+                                "Please generate the response in the form of a Python dictionary string with keys 'score', where its value is the consistency score in INTEGER, not STRING."
+                                "DO NOT PROVIDE ANY OTHER OUTPUT TEXT OR EXPLANATION. Only provide the Python dictionary string. "
+                                "For example, your response should look like this: {''score': 4.8}."
+                        }
+                    ],
+                )
+                # Convert response to a Python dictionary.
+                # response_message = completion["choices"][0]["message"]["content"]
+                response_message = completion.choices[0].message.content
+                response_dict = ast.literal_eval(response_message)
+                result_qa_pair = [response_dict, qa_set]
 
-            # Save the question-answer pairs to a json file.
-            with open(f"{output_dir}/{key}.json", "w") as f:
-                json.dump(result_qa_pair, f)
+                # Save the question-answer pairs to a json file.
+                with open(f"{output_dir}/{key}.json", "w") as f:
+                    json.dump(result_qa_pair, f)
 
-        except Exception as e:
-            print(f"Error processing file '{key}': {e}")
+                break
+            except openai.RateLimitError as e:
+                import time
+                print(f'RateLimitError: {e}')
+                time.sleep(10)
+                pass
+            except Exception as e:
+                print(f"Error processing file '{key}': {e}")
+                break
 
 
 def main():
@@ -139,7 +154,7 @@ def main():
         prediction_set[id] = qa_set
 
     # Set the OpenAI API key.
-    openai.api_key = args.api_key
+    # openai.api_key = args.api_key
     num_tasks = args.num_tasks
 
     # While loop to ensure that all captions are processed.
@@ -200,6 +215,8 @@ def main():
 
     print("Average score for consistency:", average_score * 20)
 
+    with open(os.path.join(output_dir, 'metrics.jsonl'), 'w') as f:
+        json.dump({'score': average_score * 20}, f)
 
 if __name__ == "__main__":
     main()

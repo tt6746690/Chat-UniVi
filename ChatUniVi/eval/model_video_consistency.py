@@ -104,7 +104,7 @@ def eval_model(args):
             output_ids = model.generate(
                 input_ids,
                 images=images,
-                do_sample=True,
+                do_sample=True if args.temperature!=0. else False,
                 temperature=args.temperature,
                 top_p=args.top_p,
                 num_beams=args.num_beams,
@@ -143,8 +143,8 @@ def eval_model(args):
         with torch.inference_mode():
             output_ids = model.generate(
                 input_ids,
-                images=torch.from_numpy(video_frames).half().cuda(),
-                do_sample=True,
+                images=images,
+                do_sample=True if args.temperature!=0. else False,
                 temperature=args.temperature,
                 top_p=args.top_p,
                 num_beams=args.num_beams,
