@@ -7,12 +7,12 @@ import torch
 
 
 def _get_rawvideo_dec(video_path, image_processor, max_frames=64, image_resolution=224, video_framerate=1, s=None, e=None):
-    # speed up video decode via decord.
-    video_mask = np.zeros(max_frames, dtype=np.int64)
-    max_video_length = 0
+    # # speed up video decode via decord.
+    # video_mask = np.zeros(max_frames, dtype=np.int64)
+    # max_video_length = 0
 
-    # T x 3 x H x W
-    video = np.zeros((max_frames, 3, image_resolution, image_resolution), dtype=np.float64)
+    # # T x 3 x H x W
+    # video = np.zeros((max_frames, 3, image_resolution, image_resolution), dtype=np.float64)
 
     if s is None:
         start_time, end_time = None, None
@@ -52,16 +52,18 @@ def _get_rawvideo_dec(video_path, image_processor, max_frames=64, image_resoluti
         patch_images = [image_processor.preprocess(img, return_tensors='pt')['pixel_values'][0] for img in patch_images]
         slice_len = len(patch_images)
         return  patch_images, slice_len
-        max_video_length = max_video_length if max_video_length > slice_len else slice_len
-        if slice_len < 1:
-            pass
-        else:
-            while len(patch_images) < max_frames:
-                patch_images.append(torch.zeros((3, image_resolution, image_resolution)))
-            # video[:slice_len, ...] = patch_images
+        # max_video_length = max_video_length if max_video_length > slice_len else slice_len
+        # if slice_len < 1:
+        #     pass
+        # else:
+        #     while len(patch_images) < max_frames:
+        #         patch_images.append(torch.zeros((3, image_resolution, image_resolution)))
+        #     # video[:slice_len, ...] = patch_images
     else:
-        print("video path: {} error.".format(video_path))
+        # print("video path: {} error.".format(video_path))
+        raise ValueError("video path: {} error.".format(video_path))
 
-    video_mask[:max_video_length] = [1] * max_video_length
 
-    return patch_images, video_mask
+    # video_mask[:max_video_length] = [1] * max_video_length
+
+    # return patch_images, video_mask

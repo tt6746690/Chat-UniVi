@@ -127,6 +127,7 @@ def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None):
         x = token_dict["x"]
         B, N, C = x.shape
 
+        # (B, N, N)
         dist_matrix = torch.cdist(x.float(), x.float()) / (C ** 0.5)
 
         if token_mask is not None:
@@ -152,19 +153,25 @@ def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None):
         mask = density[:, None, :] > density[:, :, None]
         mask = mask.type(x.dtype)
         dist_max = dist_matrix.flatten(1).max(dim=-1)[0][:, None, None]
+        # (B, N)
         dist, index_parent = (dist_matrix * mask + dist_max * (1 - mask)).min(dim=-1)
 
         # select clustering center according to score
+        # (B, N)
         score = dist * density
+        # index_down (B, k) having values in [0,...,N-1] representing the cluster centers
         _, index_down = torch.topk(score, k=cluster_num, dim=-1)
 
         # assign tokens to the nearest center
         dist_matrix = index_points(dist_matrix, index_down)
-
+        # (B, N) having values [0,...,64]
         idx_cluster = dist_matrix.argmin(dim=1)
 
         # make sure cluster center merge to itself
+        # wpq: really a no-op 
+        # (B, k) where idx_batch[i] = [i, ..., i]
         idx_batch = torch.arange(B, device=x.device)[:, None].expand(B, cluster_num)
+        # (B, k) where idx_batch[i] = [0, ..., k]
         idx_tmp = torch.arange(cluster_num, device=x.device)[None, :].expand(B, cluster_num)
         idx_cluster[idx_batch.reshape(-1), index_down.reshape(-1)] = idx_tmp.reshape(-1)
 
@@ -193,23 +200,35 @@ def merge_tokens(token_dict, idx_cluster, cluster_num, token_weight=None):
         token_weight = x.new_ones(B, N, 1)
 
     idx_batch = torch.arange(B, device=x.device)[:, None]
+    # (B, N): make cluster_id of each example in a batch unique.
     idx = idx_cluster + idx_batch * cluster_num
 
+    # (B*N, 1)
+    # for each example in batch, for each cluster center: add weights of tokens that is in the cluster.
+    # if uniform weight of 1 per token, this is equivalent to counting the number of examples within each cluster!
+    # assert(
+    #     torch.isclose(idx_cluster.squeeze().unique(return_counts=True)[1].reshape(all_weight.shape).to(all_weight.dtype), all_weight).all().item()
+    # )
     all_weight = token_weight.new_zeros(B * cluster_num, 1)
     all_weight.index_add_(dim=0, index=idx.reshape(B * N),
                           source=token_weight.reshape(B * N, 1))
     all_weight = all_weight + 1e-6
+    # all_weight: (B*N, 1)
+    # idx: (B, N)
+    # norm_weight: (B, N, 1) per-token weight, token from a large cluster is assigned a smaller weight
     norm_weight = token_weight / all_weight[idx]
 
     # average token features
+    # (B*k, C): token from a large cluster is assigned a smaller weight, i.e., vectorized average.
     x_merged = x.new_zeros(B * cluster_num, C)
     source = x * norm_weight
-
     x_merged.index_add_(dim=0, index=idx.reshape(B * N),
                         source=source.reshape(B * N, C).type(x.dtype))
     x_merged = x_merged.reshape(B, cluster_num, C)
 
+    # (B, N)
     idx_token_new = index_points(idx_cluster[..., None], idx_token).squeeze(-1)
+    # (B, N, 1)
     weight_t = index_points(norm_weight, idx_token)
     agg_weight_new = agg_weight * weight_t
     agg_weight_new / agg_weight_new.max(dim=1, keepdim=True)[0]

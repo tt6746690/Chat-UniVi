@@ -31,6 +31,7 @@ from ChatUniVi.model import *
 from ChatUniVi.mm_utils import tokenizer_image_token
 from ChatUniVi.config import ModelConfig, DataConfig
 from PIL import Image
+# from PIL import ImageFile; ImageFile.LOAD_TRUNCATED_IMAGES = True # remove after fixing the images that could not be loaded.
 import random
 import numpy as np
 from ChatUniVi.model.dataloader import _get_rawvideo_dec
@@ -773,6 +774,7 @@ class LazySupervisedDataset(Dataset):
                 if folder not in self.folder_dict:
                     self.folder_dict[folder] = i[folder]
 
+        random.seed(0) # wpq: make sure the ordering is the same 
         random.shuffle(list_data_dict)
 
         # wpq
@@ -788,6 +790,14 @@ class LazySupervisedDataset(Dataset):
         return len(self.list_data_dict)
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        try:
+            data_dict = self._get_item(i)
+        except:
+            raise ValueError(f"[LazySupervisedDataset] Error loading i={i} example:\t{self.list_data_dict[i]}")
+        return data_dict
+
+    def _get_item(self, i):
+
         sources = self.list_data_dict[i]
         if isinstance(i, int):
             sources = [sources]
@@ -928,6 +938,7 @@ class LazySupervisedDataset(Dataset):
             # image does not exist in the data, but the model is multimodal
             crop_size = self.data_args.image_processor.crop_size
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+
         return data_dict
 
 
@@ -1150,7 +1161,8 @@ def train():
         )
 
         vision_tower = model.get_vision_tower()
-        vision_tower.to(dtype=torch.float16, device=training_args.device)
+        # wpq: use bl16 if possible.
+        vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
         data_args.image_processor = vision_tower.image_processor
         data_args.is_multimodal = True

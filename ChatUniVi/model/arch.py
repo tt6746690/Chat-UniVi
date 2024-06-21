@@ -114,8 +114,12 @@ class ChatUniViMetaForCausalLM(ABC):
                 cluster_image_features = []
                 token_dict = {'x': image_features,
                               'token_num': image_features.size(1),
+                                # (1, N) has value: [0,1,...,N]. 
+                                # later layers represent cluster id to, e.g., 4 means current token belongs to the cluster whose cluster center is 4/576
                               'idx_token': torch.arange(image_features.size(1))[None, :].repeat(
                                   image_features.size(0), 1),
+                                # (1, M, 1) has values of 1
+                                # does not seem to be used for computation anywhere.
                               'agg_weight': image_features.new_ones(image_features.size(0), image_features.size(1),
                                                                     1),
                               'mask': None}
@@ -129,6 +133,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 token_dict = self.get_model().block2(self.get_model().ctm2(token_dict))
                 cluster_image_features.append(token_dict["x"])
 
+                # multiscale features: [(B, 64, C), (B, 32, C), (B, 16, C)] -> (B, 112, C)
                 image_features = torch.cat(cluster_image_features, dim=1)
                 image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
             else:
@@ -226,7 +231,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1), dtype=attention_mask.dtype, device=attention_mask.device)
             return input_ids, attention_mask, past_key_values, None, labels
 
-        if type(images) is list or images.ndim == 5:
+        if type(images) is list or images.ndim == 5: # might is called during generation i think.
             concat_images = torch.cat([image for image in images], dim=0)
             image_features = self.encode_images(concat_images)
             split_sizes = [image.shape[0] for image in images]
@@ -250,6 +255,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 cur_image_idx += 1
                 continue
 
+            # image_token_indices: tensor([35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48], device='cuda:0')
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
 
             cur_new_input_embeds = []
@@ -259,6 +265,10 @@ class ChatUniViMetaForCausalLM(ABC):
                 assert cur_labels.shape == cur_input_ids.shape
 
             if len(image_token_indices) > 1:
+
+                ## `temp` groups `image_token_indices` into consecutive spans
+                # e.g., [1,2,5,6,7] -> [[1,2], [5,6,7]]
+                # [[tensor(35, device='cuda:0'), tensor(36, device='cuda:0'), tensor(37, device='cuda:0'), tensor(38, device='cuda:0'), tensor(39, device='cuda:0'), tensor(40, device='cuda:0'), tensor(41, device='cuda:0'), tensor(42, device='cuda:0'), tensor(43, device='cuda:0'), tensor(44, device='cuda:0'), tensor(45, device='cuda:0'), tensor(46, device='cuda:0'), tensor(47, device='cuda:0'), tensor(48, device='cuda:0')]]
                 temp = []
                 cur, pre = image_token_indices[0], image_token_indices[0]
                 for i in image_token_indices:
@@ -313,7 +323,8 @@ class ChatUniViMetaForCausalLM(ABC):
                 else:
                     cur_input_ids = cur_input_ids[image_token_end + 1:]
 
-            elif image_token_indices.numel() > 0:
+            elif image_token_indices.numel() > 0: 
+                # wpq: preprocess images.
                 cur_image_features = []
                 image_token_start = image_token_indices[0]
                 image_token_end = image_token_indices[-1]
@@ -322,9 +333,12 @@ class ChatUniViMetaForCausalLM(ABC):
                     cur_image_features.append(image_features[cur_image_idx])
                     cur_image_idx += 1
 
+                # (B, N, D)
                 cur_image_features = torch.stack(cur_image_features, dim=0)
+                # (B, 64+32+16=112, D)
                 cur_image_features = self.project(cur_image_features, input_type="image")
                 t, l, n = cur_image_features.size()
+                # (B*112, D)
                 cur_image_features = cur_image_features.contiguous().view(t * l, n)
 
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
@@ -338,6 +352,7 @@ class ChatUniViMetaForCausalLM(ABC):
                         cur_new_labels.append(cur_labels[image_token_end:image_token_end+1])
                         cur_labels = cur_labels[image_token_end+2:]
                 else:
+                    # this branch since `tune_mm_mlp_adapter` typically set to False
                     cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
                     cur_new_input_embeds.append(cur_image_features)
                     if labels is not None:
@@ -348,12 +363,15 @@ class ChatUniViMetaForCausalLM(ABC):
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
                     cur_input_ids = cur_input_ids[image_token_end+2:]
                 else:
+                    # this branch since `tune_mm_mlp_adapter` typically set to False
                     cur_input_ids = cur_input_ids[image_token_end+1:]
 
+            ## shared by both image & video to append the latter part of the input_ids/labels.
             if cur_input_ids.numel() > 0:
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
                     cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids).detach())
                 else:
+                    # this branch since `tune_mm_mlp_adapter` typically set to False
                     cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
                 if labels is not None:
                     cur_new_labels.append(cur_labels)
@@ -364,6 +382,8 @@ class ChatUniViMetaForCausalLM(ABC):
                 cur_new_labels = torch.cat(cur_new_labels, dim=0)
                 new_labels.append(cur_new_labels)
 
+
+        # does padding to longest sequence.
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
             max_len = max(x.shape[0] for x in new_input_embeds)
 
