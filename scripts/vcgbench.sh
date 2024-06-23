@@ -3,6 +3,9 @@
 set -e
 set -x
 
+# Set up a trap to catch errors and exit all processes
+trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
+
 
 CKPT=$1
 VIDEO_FOLDER=/fsx/wpq/.data/chatunivi/eval/Test_Videos
@@ -13,7 +16,6 @@ IFS=',' read -ra GPULIST <<< "$gpu_list"
 echo $gpu_list
 
 CHUNKS=${#GPULIST[@]}
-
 
 
 if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \

@@ -1006,7 +1006,7 @@ def train():
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
 
-    # wpq: save args to a json file
+    # wpq: save args to a json file 
     from dataclasses import asdict
     with training_args.main_process_first(local=False, desc=f"Saving args to `{training_args.output_dir+'.args.json'}`"):
         os.makedirs(training_args.output_dir, exist_ok=True)
@@ -1161,8 +1161,9 @@ def train():
         )
 
         vision_tower = model.get_vision_tower()
+        vision_tower.to(dtype=torch.float16, device=training_args.device)
         # wpq: use bl16 if possible.
-        vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+        # vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
         data_args.image_processor = vision_tower.image_processor
         data_args.is_multimodal = True
