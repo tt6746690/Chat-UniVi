@@ -51,6 +51,8 @@ def eval_model(args):
         for n, m in model.named_modules():
             m = m.to(dtype=torch.bfloat16)
 
+    model = model.to("cuda")
+
     # Load the ground truth file
     with open(args.question_file) as file:
         gt_contents = json.load(file)

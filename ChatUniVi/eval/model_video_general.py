@@ -29,6 +29,7 @@ def get_chunk(lst, n, k):
 
 
 def eval_model(args):
+
     # Model
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
@@ -51,6 +52,8 @@ def eval_model(args):
     if model.config.config["use_cluster"]:
         for n, m in model.named_modules():
             m = m.to(dtype=torch.bfloat16)
+
+    model = model.to("cuda")
 
     # Load the ground truth file
     with open(args.question_file) as file:

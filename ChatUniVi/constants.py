@@ -1,10 +1,12 @@
+import os
+
 CONTROLLER_HEART_BEAT_EXPIRATION = 30
 WORKER_HEART_BEAT_INTERVAL = 15
 
 LOGDIR = "."
 
 # Model Constants
-MAX_IMAGE_LENGTH = 64
+MAX_IMAGE_LENGTH = int(os.environ.get("MAX_IMAGE_LENGTH", 16))  # Number of video frames (if using video)
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = -200
 DEFAULT_IMAGE_TOKEN = "<image>"

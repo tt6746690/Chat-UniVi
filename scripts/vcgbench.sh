@@ -8,7 +8,7 @@ trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
 
 
 CKPT=$1
-VIDEO_FOLDER=/fsx/wpq/.data/chatunivi/eval/Test_Videos
+VIDEO_FOLDER=/fsx/wpq/.data/chatunivi/eval/Chat-UniVi-Eval/Test_Videos
 NUM_TASKS_GPT_EVAL=3
 
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"

@@ -36,6 +36,8 @@ def _get_rawvideo_dec(video_path, image_processor, max_frames=64, image_resoluti
     f_start = 0 if start_time is None else int(start_time * fps)
     f_end = int(min(1000000000 if end_time is None else end_time * fps, len(vreader) - 1))
     num_frames = f_end - f_start + 1
+
+    
     if num_frames > 0:
         # T x 3 x H x W
         sample_fps = int(video_framerate)

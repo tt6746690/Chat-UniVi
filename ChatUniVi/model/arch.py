@@ -240,6 +240,14 @@ class ChatUniViMetaForCausalLM(ABC):
         else:
             image_features = self.encode_images(images)
 
+        # print({
+        #     'self.device': self.device,
+        #     'images.device': images.device,
+        #     'image_features.device': image_features.device,
+        #     'mm_projector.devicee': self.get_model().mm_projector.weight.device,
+        #     'attention_mask.device': attention_mask.device,
+        # })
+
         new_input_embeds = []
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
@@ -278,6 +286,7 @@ class ChatUniViMetaForCausalLM(ABC):
                     else:
                         temp.append([cur])
                     pre = cur
+
 
                 for i in temp:
                     image_token_start = image_token_indices[0]
