@@ -49,11 +49,12 @@ def qa_template(data):
     question = question.rstrip()
     answer = f"({chr(ord('A') + answer_idx)}) {answer}"
 
-    # wpq: this is added by videogpt+, not in mvbvench: 
+    # wpq: this is added by videogpt+, not in mvbvench
+    # actually this is in mvbench's eval script.
     # https://github.com/OpenGVLab/Ask-Anything/blob/main/video_chat2/mvbench.ipynb
-    # # Add the instruction to question
-    # question_prompt = "\nOnly give the best option."  # to change
-    # question += question_prompt
+    # Add the instruction to question
+    question_prompt = "\nOnly give the best option."  # to change
+    question += question_prompt
 
     return question, answer
 
@@ -187,6 +188,7 @@ def eval_model(args):
         conv.append_message(conv.roles[0], qs)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
+        prompt += 'Best option:('
 
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX,
                                             return_tensors='pt').unsqueeze(0).to(device)
@@ -229,6 +231,7 @@ def eval_model(args):
         if outputs.endswith(stop_str):
             outputs = outputs[:-len(stop_str)]
         outputs = outputs.strip()
+        outputs = '(' + outputs # since prompted with beginning bracket `(`
         # wpq: not necessary for now. this prob used for phi-3
         # outputs = outputs.replace("<|end|>", '')
         # outputs = outputs.strip()
