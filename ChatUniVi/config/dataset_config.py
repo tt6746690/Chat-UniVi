@@ -85,3 +85,9 @@ VIDEO = {
     "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/Fine-tuning/VIDEO/video_chat.json",
     "VIDEO": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/Fine-tuning/VIDEO/Activity_Videos",
 }
+
+ 
+VIT = {
+    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/Fine-tuning/VIT/llava_instruct_150k.json",
+    "COCO2017": "/datasets01/COCO/022719/train2017",
+}
