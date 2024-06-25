@@ -14,7 +14,7 @@ def uniform_sample(lst, n):
 
 
 
-def _get_rawvideo_dec(video_path, image_processor, max_frames=64, image_resolution=224, video_framerate=1, s=None, e=None):
+def _get_rawvideo_dec(video_path, image_processor, max_frames=64, image_resolution=224, video_framerate=1, s=None, e=None, num_threads=0):
 
     if s is None:
         start_time, end_time = None, None
@@ -29,10 +29,12 @@ def _get_rawvideo_dec(video_path, image_processor, max_frames=64, image_resoluti
             end_time = start_time + 1
 
     if os.path.exists(video_path):
-        vreader = VideoReader(video_path, ctx=cpu(0))
+        vreader = VideoReader(video_path, num_threads=num_threads)
+        # vreader = VideoReader(video_path, num_threads=1)
+        # num_threads=1 makes decoding a bit slower. so just set num_threads for Action Antonym.
+        # wpq: https://github.com/dmlc/decord/issues/145
     else:
-        print(video_path)
-        raise FileNotFoundError
+        raise FileNotFoundError(video_path)
 
     fps = vreader.get_avg_fps()
     f_start = 0 if start_time is None else int(start_time * fps)
@@ -53,7 +55,8 @@ def _get_rawvideo_dec(video_path, image_processor, max_frames=64, image_resoluti
         sample_pos = all_pos
 
     patch_images = [Image.fromarray(f) for f in vreader.get_batch(sample_pos).asnumpy()]
-    patch_images = [image_processor.preprocess(img, return_tensors='pt')['pixel_values'][0] for img in patch_images]
+    if image_processor:
+        patch_images = [image_processor.preprocess(img, return_tensors='pt')['pixel_values'][0] for img in patch_images]
     slice_len = len(patch_images)
 
     return  patch_images, slice_len
@@ -91,7 +94,8 @@ def read_frame_mod(video_path, image_processor, max_frames=16, image_resolution=
 
     num_video_frames_sampled = min(max_frames, len(all_frames))
     patch_images = uniform_sample(all_frames, num_video_frames_sampled)
-    patch_images = [image_processor.preprocess(img, return_tensors='pt')['pixel_values'][0] for img in patch_images]
+    if image_processor:
+        patch_images = [image_processor.preprocess(img, return_tensors='pt')['pixel_values'][0] for img in patch_images]
     slice_len = len(patch_images)
 
     return patch_images, slice_len
@@ -129,7 +133,8 @@ def read_gif_mod(video_path, image_processor, max_frames=16, image_resolution=22
                 break
     # Transform images
     patch_images = processed_frames
-    patch_images = [image_processor.preprocess(img, return_tensors='pt')['pixel_values'][0] for img in patch_images]
+    if image_processor:
+        patch_images = [image_processor.preprocess(img, return_tensors='pt')['pixel_values'][0] for img in patch_images]
     slice_len = len(patch_images)
 
     return  patch_images, slice_len

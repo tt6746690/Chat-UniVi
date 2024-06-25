@@ -146,6 +146,7 @@ class ChatUniViMetaForCausalLM(ABC):
                                                                   1),
                               'mask': None}
 
+
                 down_dict, token_dict = self.get_model().ctm3(token_dict)
                 events = OrderedDict()
 
@@ -165,6 +166,7 @@ class ChatUniViMetaForCausalLM(ABC):
                               'agg_weight': image_features.new_ones(image_features.size(0), image_features.size(1),
                                                                     1),
                               'mask': None}
+
 
                 token_dict0 = self.get_model().block0(self.get_model().ctm0(token_dict))
                 token_dict1 = self.get_model().block1(self.get_model().ctm1(token_dict0))
@@ -219,12 +221,33 @@ class ChatUniViMetaForCausalLM(ABC):
                     0), torch.mean(image_features, dim=1, keepdim=False).unsqueeze(0)
                 image_features = torch.cat([image_features, cls_features], dim=1)
 
+        # import json, logging
+        # logging.info('project before mm_projector: ' + json.dumps({
+        #     'self.device': str(self.device),
+        #     'mm_projector.weight.device': str(self.get_model().mm_projector.weight.device),
+        #     'mm_projector.bias.device': str(self.get_model().mm_projector.bias.device),
+        #     'image_features.device': str(image_features.device),
+        # }, indent=4))
+
+
         image_features = self.get_model().mm_projector(image_features)
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, attention_mask, past_key_values, labels, images
     ):
+        # # wpq: device not placed properly using ddp for multi-gpu inference, hot fix
+        # def transfer(t):
+        #     if t is not None and isinstance(t, torch.Tensor) and self.device != t.device:
+        #         return t.to(self.device)
+        #     else:
+        #         return t
+        # input_ids = transfer(input_ids)
+        # attention_mask = transfer(attention_mask)
+        # past_key_values = transfer(past_key_values)
+        # labels = transfer(labels)
+        # images = transfer(images)
+        
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
@@ -240,13 +263,6 @@ class ChatUniViMetaForCausalLM(ABC):
         else:
             image_features = self.encode_images(images)
 
-        # print({
-        #     'self.device': self.device,
-        #     'images.device': images.device,
-        #     'image_features.device': image_features.device,
-        #     'mm_projector.devicee': self.get_model().mm_projector.weight.device,
-        #     'attention_mask.device': attention_mask.device,
-        # })
 
         new_input_embeds = []
         new_labels = [] if labels is not None else None
@@ -299,6 +315,8 @@ class ChatUniViMetaForCausalLM(ABC):
 
                     if len(i) > 2:
                         cur_image_features = torch.stack(cur_image_features, dim=0)
+
+
                         cur_image_features = self.project(cur_image_features, input_type="video")
                         t, l, n = cur_image_features.size()
                         cur_image_features = cur_image_features.contiguous().view(t * l, n)
@@ -319,6 +337,20 @@ class ChatUniViMetaForCausalLM(ABC):
                             cur_new_labels.append(cur_labels[image_token_end:image_token_end + 1])
                             cur_labels = cur_labels[image_token_end + 2:]
                     else:
+                        
+
+                        # import json, logging
+                        # logging.info('prepare_inputs_labels_for_multimodal before apply embed_tokens to cur_input_ids: '+ json.dumps({
+                        #     'self.device': str(self.device),
+                        #     'mm_projector.device': str(self.get_model().mm_projector.weight.device),
+                        #     'embed_tokens.device': str(self.get_model().embed_tokens.weight.device),
+                        #     'input_ids.device': str(input_ids.device),
+                        #     'images.device': str(images.device),
+                        #     'attention_mask.device': str(attention_mask.device),
+                        #     'image_features.device': str(image_features.device),
+                        #     'cur_input_ids': str(cur_input_ids[:image_token_start].device),
+                        # }, indent=4))
+
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
                         cur_new_input_embeds.append(cur_image_features)
                         if labels is not None:

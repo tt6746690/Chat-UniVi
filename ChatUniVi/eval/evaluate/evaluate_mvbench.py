@@ -8,12 +8,14 @@ def check_ans(pred, gt):
     flag = False
 
     pred_list = pred.lower().split(' ')
-    pred_option, pred_content = pred_list[1], ' '.join(pred_list[1:])
-    gt_list = gt.lower().split(' ')
-    gt_option, gt_content = gt_list[0], ' '.join(gt_list[1:])
-    if gt_content[-1] == '.':
-        gt_content = gt_content[:-1]
-    print(gt_option, pred_option)
+    pred_option = pred_list[0]
+    # (a) table is blue -> ['(a)', 'table', 'is', 'blue']
+    gt_list = gt.lower().split(' ') 
+    # '(a)'
+    gt_option = gt_list[0] 
+    # if gt_content[-1] == '.':
+    #     gt_content = gt_content[:-1]
+    # print('check_ans: ', gt_option, pred_option)
     if pred_option.replace('.', '') in gt_option:
         flag = True
     elif gt_option in pred_option:
@@ -23,11 +25,12 @@ def check_ans(pred, gt):
 
 
 def main(args):
-    result_files = os.listdir(args.output_dir, 'answers')
+    result_files = os.listdir(os.path.join(args.output_dir, 'answers'))
 
     correct = 0
     total = 0
     acc_dict = {}
+    data_dict = []
 
     for file in tqdm(result_files):
         if file.endswith('.json'):
@@ -43,9 +46,14 @@ def main(args):
                 acc_dict[task_type] = [0, 0]  # correct, total
             acc_dict[task_type][1] += 1
             total += 1
-            if check_ans(pred=pred, gt=gt_answer):
+
+            ans = check_ans(pred=pred, gt=gt_answer)
+            if ans:
                 acc_dict[task_type][0] += 1
                 correct += 1
+
+            json_data.update({'ans': ans})
+            data_dict.append(json_data)
 
     types = {'Action Sequence': 0, 'Action Prediction': 0, 'Action Antonym': 0, 'Fine-grained Action': 0,
              'Unexpected Action': 0, 'Object Existence': 0, 'Object Interaction': 0, 'Object Shuffle': 0,
@@ -68,13 +76,13 @@ def main(args):
     with open(os.path.join(args.output_dir, 'metrics.json'), 'w') as f:
         json.dump(result_dict, f)
 
+    with open(os.path.join(args.output_dir, 'answers.json'), 'w') as f:
+        json.dump(data_dict, f, indent=4)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", type=str, default="MBZUAI/VideoGPT-plus_Phi3-mini-4k/mvbench_eval")
+    parser.add_argument("--output-dir", type=str, default="MBZUAI/VideoGPT-plus_Phi3-mini-4k/mvbench_eval")
     args = parser.parse_args()
-
-    # wpq: put under `answers` to decluter
-    args.output_dir = os.path.join(args.output_dir, 'answers')
 
     main(args)

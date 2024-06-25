@@ -4,7 +4,7 @@ import argparse
 import torch
 import os
 import json
-import random
+import subprocess
 from tqdm import tqdm
 import shortuuid
 from ChatUniVi.constants import *
@@ -13,19 +13,9 @@ from ChatUniVi.model.builder import load_pretrained_model
 from ChatUniVi.utils import disable_torch_init
 from ChatUniVi.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
 from ChatUniVi.eval.video_encoding import _get_rawvideo_dec, read_frame_mod, read_gif_mod
-from torch.utils.data import Dataset, DataLoader
-import math
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
+import traceback
 
-
-def get_chunk(lst, n, k, seed=0):
-    """randomize the examples ordering. """
-    random.seed(seed)
-    indices = list(range(len(lst)))
-    random.shuffle(indices)  # Shuffle the indices deterministically
-    chunk_size = math.ceil(len(lst) / n) # integer division
-    chunks = [indices[i:i + chunk_size] for i in range(0, len(indices), chunk_size)]
-    chunk = [lst[idx] for idx in chunks[k]]
-    return chunk
 
 
 def disable_torch_init():
@@ -34,6 +24,73 @@ def disable_torch_init():
     """
     import torch
     setattr(torch.nn.Linear, "reset_parameters", lambda self: None)
+
+
+
+def setup_for_distributed(is_master):
+    """
+    This function disables printing when not in master process
+    """
+    import builtins as __builtin__
+    builtin_print = __builtin__.print
+
+    def print(*args, **kwargs):
+        force = kwargs.pop('force', False)
+        if is_master or force:
+            builtin_print(*args, **kwargs)
+
+    __builtin__.print = print
+
+
+
+def init_distributed_mode(args):
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        args.rank = int(os.environ["RANK"])
+        args.world_size = int(os.environ['WORLD_SIZE'])
+        args.gpu = int(os.environ['LOCAL_RANK'])
+        args.dist_url = 'env://'
+        os.environ['LOCAL_SIZE'] = str(torch.cuda.device_count())
+        print('Using distributed mode: 1')
+    elif 'SLURM_PROCID' in os.environ:
+        num_gpus = torch.cuda.device_count()
+        proc_id = int(os.environ['SLURM_PROCID'])
+        ntasks = int(os.environ['SLURM_NTASKS'])
+        node_list = os.environ['SLURM_NODELIST']
+        num_gpus = torch.cuda.device_count()
+        addr = subprocess.getoutput(
+            'scontrol show hostname {} | head -n1'.format(node_list))
+        os.environ['MASTER_PORT'] = os.environ.get('MASTER_PORT', '3461')
+        os.environ['MASTER_ADDR'] = addr
+        os.environ['WORLD_SIZE'] = str(ntasks)
+        os.environ['RANK'] = str(proc_id)
+        os.environ['LOCAL_RANK'] = str(proc_id % num_gpus)
+        os.environ['LOCAL_SIZE'] = str(num_gpus)
+        args.dist_url = 'env://'
+        args.world_size = ntasks
+        args.rank = proc_id
+        args.gpu = proc_id % num_gpus
+        print('Using distributed mode: slurm')
+        print(f"world: {os.environ['WORLD_SIZE']}, rank:{os.environ['RANK']},"
+              f" local_rank: {os.environ['LOCAL_RANK']}, local_size: {os.environ['LOCAL_SIZE']}")
+    else:
+        print('Not using distributed mode')
+        args.distributed = False
+        return
+
+    args.distributed = True
+
+    torch.cuda.set_device(args.gpu)
+    args.dist_backend = 'nccl'
+    print('| distributed init (rank {}): {}'.format(
+        args.rank, args.dist_url), flush=True)
+    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+                                         world_size=args.world_size, rank=args.rank)
+    torch.distributed.barrier()
+    # setup_for_distributed(args.rank == 0)
+    # setup_for_distributed(args.rank == 1)
+
+    import logging
+    logging.basicConfig(level=logging.INFO, filemode='w', filename=f'process_{args.gpu}.log')
 
 
 
@@ -49,18 +106,16 @@ def qa_template(data):
     question = question.rstrip()
     answer = f"({chr(ord('A') + answer_idx)}) {answer}"
 
-    # wpq: this is added by videogpt+, not in mvbvench: 
-    # https://github.com/OpenGVLab/Ask-Anything/blob/main/video_chat2/mvbench.ipynb
-    # # Add the instruction to question
-    # question_prompt = "\nOnly give the best option."  # to change
-    # question += question_prompt
+    # Add the instruction to question
+    question_prompt = "\nOnly give the best option."  # to change
+    question += question_prompt
 
     return question, answer
 
 
 
 class EvalDatasetMvBench(Dataset):
-    def __init__(self, gt_dir, video_dir, image_processor, mvbench_data_list, num_chunks=None, chunk_idx=None):
+    def __init__(self, gt_dir, video_dir, image_processor, mvbench_data_list):
         self.gt_contents = []
         for k, v in mvbench_data_list.items():
             with open(os.path.join(gt_dir, v[0]), 'r') as f:
@@ -69,9 +124,6 @@ class EvalDatasetMvBench(Dataset):
                 self.gt_contents.append(
                     {'task_type': k, 'prefix': v[1], 'data_type': v[2], 'bound': v[3], 'data': data}
                 )
-        if num_chunks is not None and chunk_idx is not None:
-            self.gt_contents = get_chunk(self.gt_contents, num_chunks, chunk_idx)
-
         self.video_dir = video_dir
         self.image_processor = image_processor
 
@@ -163,11 +215,13 @@ def eval_model(args):
         for n, m in model.named_modules():
             m = m.to(dtype=torch.bfloat16)
     
-    device = 'cuda'
+    device = f'cuda:{args.gpu}' if args.world_size > 1 else 'cuda'
     model = model.to(device)
 
-    dataset = EvalDatasetMvBench(args.question_dir, args.video_folder, image_processor, mvbench_data_list, args.num_chunks, args.chunk_idx)
-    dataloader = DataLoader(dataset, batch_size=1, num_workers=8)
+
+    dataset = EvalDatasetMvBench(args.question_dir, args.video_folder, image_processor, mvbench_data_list)
+    distributed_sampler = DistributedSampler(dataset, rank=args.rank, num_replicas=args.world_size, shuffle=False)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size_per_gpu, num_workers=8, sampler=distributed_sampler)
 
     for (idx, sample_set, video_frames, slice_len) in tqdm(dataloader):
         idx, sample_set, video_frames, slice_len = int(idx[0]), sample_set[
@@ -235,8 +289,10 @@ def eval_model(args):
 
         ans_id = shortuuid.uuid()
         video_json_name = sample['video_name'][0].replace('/', '_')
-        if len(video_json_name) > 100:
-            video_json_name = video_json_name[50:]
+        # wpq: ensure every file is unique
+        # if len(video_json_name) > 100:
+        #     video_json_name = video_json_name[50:]
+
         results = {'video_name': sample['video_name'][0],
                     "prompt": cur_prompt,
                     "pred": outputs,
@@ -265,10 +321,15 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
-    parser.add_argument("--num-chunks", type=int, default=1)
-    parser.add_argument("--chunk-idx", type=int, default=0)
+
+    parser.add_argument("--batch_size_per_gpu", type=int, required=False, default=1)
+    parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
+    parser.add_argument('--local_rank', default=-1, type=int)
+    parser.add_argument('--dist_url', type=str, default='env://', help='url used to set up distributed training')
 
     args = parser.parse_args()
+
+    init_distributed_mode(args)
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.join(args.output_dir, 'answers'), exist_ok=True)

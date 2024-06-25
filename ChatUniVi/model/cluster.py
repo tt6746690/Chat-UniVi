@@ -104,7 +104,7 @@ def index_points(points, idx):
     repeat_shape = list(idx.shape)
     repeat_shape[0] = 1
     batch_indices = torch.arange(B, dtype=torch.long).to(device).view(view_shape).repeat(repeat_shape)
-    new_points = points[batch_indices, idx, :]
+    new_points = points[batch_indices, idx.to(device), :]
     return new_points
 
 
@@ -248,8 +248,15 @@ class CTM(nn.Module):
         self.sample_ratio = sample_ratio
         self.dim_out = dim_out
         self.k = k
+        # self.dummy_param = nn.Parameter(torch.empty(0))
 
     def forward(self, token_dict, sample_ratio=None):
+        # # wpq: device not placed properly using ddp for multi-gpu inference, hot fix
+        # # even if right before this function is called, the tensor is on the correct device.
+        # for k in ['x', 'agg_weight', 'mask']:
+        #     if token_dict[k] is not None and isinstance(token_dict[k], torch.Tensor) and token_dict[k].device != self.dummy_param.device:
+        #         token_dict[k] = token_dict[k].to(self.dummy_param.device)
+
         x = token_dict["x"]
         B, N, C = x.shape
 
@@ -268,6 +275,8 @@ class CTM(nn.Module):
             cluster_num = max(math.ceil(N * self.sample_ratio), 1)
 
         k = min(3, max(cluster_num//2, 1)) if self.k > cluster_num else self.k
+
+
         idx_cluster, cluster_num = cluster_dpc_knn(
             token_dict, cluster_num, k, token_mask=token_dict["mask"])
 
@@ -279,6 +288,7 @@ class TCBlock(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, sr_ratio=1, use_sr_layer=False):
         super().__init__()
+        # self.dummy_param = nn.Parameter(torch.empty(0))
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -301,6 +311,10 @@ class TCBlock(nn.Module):
             q_dict, kv_dict = inputs
         else:
             q_dict, kv_dict = inputs, None
-
-        x = q_dict['x']
+        # # wpq: device not placed properly using ddp for multi-gpu inference, hot fix
+        # # even if right before this function is called, the tensor is on the correct device.
+        # for k in ['x', 'agg_weight', 'mask']:
+        #     if q_dict[k] is not None and isinstance(q_dict[k], torch.Tensor) and q_dict[k].device != self.dummy_param.device:
+        #         q_dict[k] = q_dict[k].to(self.dummy_param.device)
+        # x = q_dict['x']
         return q_dict
