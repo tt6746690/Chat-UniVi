@@ -108,7 +108,7 @@ def index_points(points, idx):
     return new_points
 
 
-def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None):
+def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None, token_coord=None, coord_weight=0):
     """Cluster tokens with DPC-KNN algorithm.
     Return:
         idx_cluster (Tensor[B, N]): cluster index of each token.
@@ -136,10 +136,16 @@ def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None):
             # and any other tokens should be the maximal distance.
             dist_matrix = dist_matrix * token_mask[:, None, :] + \
                           (dist_matrix.max() + 1) * (~token_mask[:, None, :])
+        
+        # wpq: distance in xy coordinate space to encourage merging of nearby tokens.
+        if token_coord is not None and coord_weight > 0:
+            dist_matrix_coord = torch.cdist(token_coord.float(), token_coord.float()) / math.sqrt(3)
+            dist_matrix = dist_matrix * torch.exp(coord_weight*dist_matrix_coord)
 
         # get local density
 
         dist_nearest, index_nearest = torch.topk(dist_matrix, k=k, dim=-1, largest=False)
+        # (B, N)
         density = (-(dist_nearest ** 2).mean(dim=-1)).exp()
         # add a little noise to ensure no tokens have the same density.
         density = density + torch.rand(
@@ -152,14 +158,22 @@ def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None):
         # get distance indicator
         mask = density[:, None, :] > density[:, :, None]
         mask = mask.type(x.dtype)
+        # wpq: https://github.com/PKU-YuanGroup/Chat-UniVi/issues/40
+        # previously, flatten gets max distance of each batch, but we want max distance for each token.
+        # in practice, these two max distance does not vary by that much, e.g., max(batch)=7.486 vs. max(token)\in [5.7, 7.48]
+        # in addition, after masking (next 2 lines), the resulting `dist` is identical for 1 image I tested due the presence of a single cluster that has very high score.
+        # 
         dist_max = dist_matrix.flatten(1).max(dim=-1)[0][:, None, None]
+        # dist_max = dist_matrix.max(dim=-1)[0][:, :, None]
         # (B, N)
         dist, index_parent = (dist_matrix * mask + dist_max * (1 - mask)).min(dim=-1)
 
         # select clustering center according to score
         # (B, N)
         score = dist * density
+
         # index_down (B, k) having values in [0,...,N-1] representing the cluster centers
+        # e.g., contains the token index that represents the cluster centers.
         _, index_down = torch.topk(score, k=cluster_num, dim=-1)
 
         # assign tokens to the nearest center
@@ -175,7 +189,7 @@ def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None):
         idx_tmp = torch.arange(cluster_num, device=x.device)[None, :].expand(B, cluster_num)
         idx_cluster[idx_batch.reshape(-1), index_down.reshape(-1)] = idx_tmp.reshape(-1)
 
-    return idx_cluster, cluster_num
+    return idx_cluster, cluster_num, index_down
 
 
 def merge_tokens(token_dict, idx_cluster, cluster_num, token_weight=None):
@@ -226,6 +240,15 @@ def merge_tokens(token_dict, idx_cluster, cluster_num, token_weight=None):
                         source=source.reshape(B * N, C).type(x.dtype))
     x_merged = x_merged.reshape(B, cluster_num, C)
 
+    # average spatial coordinate
+    if 'coord' in token_dict:
+        coord = token_dict['coord']
+        coord_merged = coord.new_zeros(B * cluster_num, 2)
+        source = coord * norm_weight
+        coord_merged.index_add_(dim=0, index=idx.reshape(B * N),
+                                source=source.reshape(B * N, 2).type(coord.dtype))
+        coord_merged = coord_merged.reshape(B, cluster_num, 2)
+
     # (B, N)
     idx_token_new = index_points(idx_cluster[..., None], idx_token).squeeze(-1)
     # (B, N, 1)
@@ -239,23 +262,20 @@ def merge_tokens(token_dict, idx_cluster, cluster_num, token_weight=None):
     out_dict['idx_token'] = idx_token_new
     out_dict['agg_weight'] = agg_weight_new
     out_dict['mask'] = None
+    if 'coord' in token_dict:
+        out_dict['coord'] = coord_merged
     return out_dict
 
 
 class CTM(nn.Module):
-    def __init__(self, sample_ratio, embed_dim, dim_out, k=5):
+    def __init__(self, sample_ratio, embed_dim, dim_out, k=5, coord_weight=0):
         super().__init__()
         self.sample_ratio = sample_ratio
         self.dim_out = dim_out
         self.k = k
-        # self.dummy_param = nn.Parameter(torch.empty(0))
+        self.coord_weight = coord_weight
 
     def forward(self, token_dict, sample_ratio=None):
-        # # wpq: device not placed properly using ddp for multi-gpu inference, hot fix
-        # # even if right before this function is called, the tensor is on the correct device.
-        # for k in ['x', 'agg_weight', 'mask']:
-        #     if token_dict[k] is not None and isinstance(token_dict[k], torch.Tensor) and token_dict[k].device != self.dummy_param.device:
-        #         token_dict[k] = token_dict[k].to(self.dummy_param.device)
 
         x = token_dict["x"]
         B, N, C = x.shape
@@ -276,11 +296,18 @@ class CTM(nn.Module):
 
         k = min(3, max(cluster_num//2, 1)) if self.k > cluster_num else self.k
 
-
-        idx_cluster, cluster_num = cluster_dpc_knn(
-            token_dict, cluster_num, k, token_mask=token_dict["mask"])
+        token_coord = token_dict['coord'] if 'coord' in token_dict else None
+        idx_cluster, cluster_num, index_down = cluster_dpc_knn(
+            token_dict, cluster_num, k, token_mask=token_dict["mask"], token_coord=token_coord, coord_weight=self.coord_weight)
 
         down_dict = merge_tokens(token_dict, idx_cluster, cluster_num, token_weight)
+
+
+        # wpq: to keep track of token cluster assignment by index of the cluster center token.
+        # down_dict['idx_token_orig'] = index_points(index_down[...,None], idx_token).squeeze(-1)
+        down_dict['index_down'] = index_down
+        down_dict['idx_cluster'] = idx_cluster
+
         return down_dict, token_dict
 
 
@@ -288,7 +315,6 @@ class TCBlock(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, sr_ratio=1, use_sr_layer=False):
         super().__init__()
-        # self.dummy_param = nn.Parameter(torch.empty(0))
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -311,10 +337,4 @@ class TCBlock(nn.Module):
             q_dict, kv_dict = inputs
         else:
             q_dict, kv_dict = inputs, None
-        # # wpq: device not placed properly using ddp for multi-gpu inference, hot fix
-        # # even if right before this function is called, the tensor is on the correct device.
-        # for k in ['x', 'agg_weight', 'mask']:
-        #     if q_dict[k] is not None and isinstance(q_dict[k], torch.Tensor) and q_dict[k].device != self.dummy_param.device:
-        #         q_dict[k] = q_dict[k].to(self.dummy_param.device)
-        # x = q_dict['x']
         return q_dict

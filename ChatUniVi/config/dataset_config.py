@@ -80,6 +80,12 @@ LLaVA = {
     "llava": "/fsx/wpq/.data/videollava/",
 }
 
+LLaVA200k = {
+    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_tune_200k.json",
+    "llava": "/fsx/wpq/.data/videollava/",
+}
+
+
 
 VIDEO = {
     "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/Fine-tuning/VIDEO/video_chat.json",

@@ -16,5 +16,6 @@ DataConfig = {
     "FINETUNEv1.5": [VIT, VIDEO, LLaVA],
     'valley703k+llavalcs558k': [Pretrain_valley_llava],
     'vcg100k+llava665k': [VIDEO, LLaVA],
+    'vcg100k+llava200k': [VIDEO, LLaVA200k],
     'vit150k+vcg100k+llava665k': [VIT, VIDEO, LLaVA],
 }

@@ -8,6 +8,7 @@ trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
 
 
 CKPT=$1
+MAX_IMAGE_LENGTH=16 # default used by mvbench's paper.
 
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
@@ -26,7 +27,6 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
 done
 
 wait
-
 
 python ChatUniVi/eval/evaluate/evaluate_mvbench.py \
     --output-dir $CKPT/eval/mvbench
