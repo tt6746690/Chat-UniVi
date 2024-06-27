@@ -139,7 +139,8 @@ def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None, token_coord=N
         
         # wpq: distance in xy coordinate space to encourage merging of nearby tokens.
         if token_coord is not None and coord_weight > 0:
-            dist_matrix_coord = torch.cdist(token_coord.float(), token_coord.float()) / math.sqrt(3)
+            coord_dim = token_coord.shape[-1]
+            dist_matrix_coord = torch.cdist(token_coord.float(), token_coord.float()) / math.sqrt(coord_dim)
             dist_matrix = dist_matrix * torch.exp(coord_weight*dist_matrix_coord)
 
         # get local density
@@ -162,9 +163,8 @@ def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None, token_coord=N
         # previously, flatten gets max distance of each batch, but we want max distance for each token.
         # in practice, these two max distance does not vary by that much, e.g., max(batch)=7.486 vs. max(token)\in [5.7, 7.48]
         # in addition, after masking (next 2 lines), the resulting `dist` is identical for 1 image I tested due the presence of a single cluster that has very high score.
-        # 
-        dist_max = dist_matrix.flatten(1).max(dim=-1)[0][:, None, None]
-        # dist_max = dist_matrix.max(dim=-1)[0][:, :, None]
+        # dist_max = dist_matrix.flatten(1).max(dim=-1)[0][:, None, None]
+        dist_max = dist_matrix.max(dim=-1)[0][:, :, None]
         # (B, N)
         dist, index_parent = (dist_matrix * mask + dist_max * (1 - mask)).min(dim=-1)
 
@@ -243,11 +243,12 @@ def merge_tokens(token_dict, idx_cluster, cluster_num, token_weight=None):
     # average spatial coordinate
     if 'coord' in token_dict:
         coord = token_dict['coord']
-        coord_merged = coord.new_zeros(B * cluster_num, 2)
+        coord_dim = coord.shape[-1] # 1, 2, or 3
+        coord_merged = coord.new_zeros(B * cluster_num, coord_dim)
         source = coord * norm_weight
         coord_merged.index_add_(dim=0, index=idx.reshape(B * N),
-                                source=source.reshape(B * N, 2).type(coord.dtype))
-        coord_merged = coord_merged.reshape(B, cluster_num, 2)
+                                source=source.reshape(B * N, coord_dim).type(coord.dtype))
+        coord_merged = coord_merged.reshape(B, cluster_num, coord_dim)
 
     # (B, N)
     idx_token_new = index_points(idx_cluster[..., None], idx_token).squeeze(-1)

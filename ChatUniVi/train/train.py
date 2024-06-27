@@ -61,6 +61,9 @@ class ModelArguments:
     model_use: str = field(default="BASE")
     mm_use_box_start_end: bool = field(default=False)
 
+    # wpq:
+    coord_weight: float = field(default=0)
+
 
 @dataclass
 class DataArguments:
