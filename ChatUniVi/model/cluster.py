@@ -380,14 +380,16 @@ def create_token_dict_from_features(image_features, sizes=None):
     return token_dict
 
 
-class ImageTokenMergeClusterDPCKNN(nn.Module):
-    def __init__(self, sample_ratios, ks, coord_weight, coord_dim):
-        super().__init__()
 
+class TokenMergeClusterDPCKNN(nn.Module):
+    """Token merging with dpc-knn. Agnostic of dimension of features (e.g., 1d, image, video).
+        but need to supply `self.forward` with properly constructed `token_dict`. """
+
+    def __init__(self, sample_ratios, ks, coord_weight):
+        super().__init__()
         self.sample_ratios = sample_ratios
         self.ks = ks
         self.coord_weight = coord_weight
-        self.coord_dim = coord_dim
 
         # not really used anywhere
         embed_dim = 1024
@@ -407,23 +409,11 @@ class ImageTokenMergeClusterDPCKNN(nn.Module):
             block = TCBlock(dim=dim_out, num_heads=8)
             self.ctms.append(ctm)
             self.tc_blocks.append(block)
-
-    def forward(self, image_features, token_dict=None):
+        
+    def forward(self, token_dict):
+        """Returns [token_list, token_list0, ...,]
+                a list of state, e.g., cluster membership, merged features etc. initially and after each layer.
         """
-        `image_features`
-            (B*N, PH*PW, C)
-        Returns [token_list, token_list0, ...,]
-            a list of state, e.g., cluster membership, merged features etc. initially and after each layer.
-        """
-        if token_dict is None:
-            # assume square image or cubic video
-            if self.coord_dim == 1:
-                sizes = (image_features.shape[1],)
-            elif self.coord_dim == 2:
-                sizes = (int(math.sqrt(image_features.shape[1])),)*2
-            elif self.coord_dim == 3:
-                sizes = (int(image_features.shape[1] ** (1 / 3)),)*3
-            token_dict = create_token_dict_from_features(image_features, sizes)
         token_dict_list = [token_dict]
         for ctm, block in zip(self.ctms, self.tc_blocks):
             # x: (B, N, D) -> (B, #clusters, D)
@@ -435,7 +425,46 @@ class ImageTokenMergeClusterDPCKNN(nn.Module):
     def __repr__(self):
         return "".join(
             [
-                "ImageTokenMergeClusterDPCKNN",
+                "TokenMergeClusterDPCKNN",
+                "(",
+                str(self.sample_ratios).replace(" ", "") + ",",
+                str(self.ks).replace(" ", "") + ",",
+                str(self.coord_weight),
+                ")",
+            ]
+        )
+
+
+class UnitTokenMergeClusterDPCKNN(TokenMergeClusterDPCKNN):
+    """Token merging with dpc-knn. depends on the dimension of features (e.g., 1d, image, video).
+        Assumes that the features are of unit length, e.g., square image, video with same length as 
+        the number of patches in x direction.
+    """
+    def __init__(self, sample_ratios, ks, coord_weight, coord_dim):
+        super().__init__(sample_ratios, ks, coord_weight)
+        self.coord_dim = coord_dim
+
+    def forward(self, image_features):
+        """
+        `image_features` (B, N, C)
+            if `features` is 1d, then N is number of features
+            if `features` is 2d, then it represents a sqrt(N)xsqrt(N) image
+            if `features` is 3d, then it represents a cube with length of each side as N**(1/3)
+        """
+        # assume square image or cubic video
+        if self.coord_dim == 1:
+            sizes = (image_features.shape[1],)
+        elif self.coord_dim == 2:
+            sizes = (int(math.sqrt(image_features.shape[1])),)*2
+        elif self.coord_dim == 3:
+            sizes = (int(image_features.shape[1] ** (1 / 3)),)*3
+        token_dict = create_token_dict_from_features(image_features, sizes)
+        return super().forward(token_dict)
+
+    def __repr__(self):
+        return "".join(
+            [
+                "UnitTokenMergeClusterDPCKNN",
                 "(",
                 str(self.sample_ratios).replace(" ", "") + ",",
                 str(self.ks).replace(" ", "") + ",",
