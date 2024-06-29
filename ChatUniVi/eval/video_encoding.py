@@ -48,11 +48,24 @@ def _get_rawvideo_dec(video_path, image_processor, max_frames=64, image_resoluti
     sample_fps = int(video_framerate)
     t_stride = int(round(float(fps) / sample_fps))
 
+
     all_pos = list(range(f_start, f_end + 1, t_stride))
     if len(all_pos) > max_frames:
         sample_pos = [all_pos[_] for _ in np.linspace(0, len(all_pos) - 1, num=max_frames, dtype=int)]
     else:
         sample_pos = all_pos
+    
+    # print({
+    #     'fps': fps,
+    #     'sample_fps': sample_fps,
+    #     'len(vreader)': len(vreader),
+    #     'f_start': f_start,
+    #     'f_end': f_end,
+    #     'num_frames': num_frames,
+    #     't_stride': t_stride,
+    #     'all_pos': all_pos,
+    #     'sample_pos': sample_pos,
+    # })
 
     patch_images = [Image.fromarray(f) for f in vreader.get_batch(sample_pos).asnumpy()]
     if image_processor:

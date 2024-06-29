@@ -1197,16 +1197,11 @@ def train():
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
-        model_config = ModelConfig[str(model_args.model_use)]
+        cluster_config = ModelConfig[str(model_args.model_use)]
         model.config.aarchitectures = "LlavaLlamaForCausalLM"
 
-        model.config.config = model_config
-        model_args.use_cluster = model_config["use_cluster"]
-        model_args.spatial_cluster_rate0 = model_config["spatial_cluster_rate0"]
-        model_args.spatial_cluster_rate1 = model_config["spatial_cluster_rate1"]
-        model_args.spatial_cluster_rate2 = model_config["spatial_cluster_rate2"]
-        model_args.temporal_cluster_rate = model_config.get("temporal_cluster_rate", 1 / 16)
-        model.get_model().initialize_cluster_modules(model_args)
+        model.config.cluster_config = cluster_config
+        model.get_model().initialize_cluster_modules(cluster_config)
 
         if model_args.use_cluster:
             for n, p in model.named_parameters():
@@ -1222,7 +1217,7 @@ def train():
                 for p in model.get_model().mm_projector.parameters():
                     p.requires_grad = True
 
-        model_args.vision_tune = model_config["vision_tune"]
+        model_args.vision_tune = cluster_config["vision_tune"]
         for p in model.get_vision_tower().parameters():
             p.requires_grad = model_args.vision_tune
 

@@ -339,3 +339,108 @@ class TCBlock(nn.Module):
         else:
             q_dict, kv_dict = inputs, None
         return q_dict
+
+
+def create_token_dict_from_features(image_features, sizes=None):
+    """Create `token_dict` as input to clustering layers.
+        If `sizes` is None, then `image_features` assumed to be 1d signal.
+    """
+
+    B, N, D = image_features.shape
+    coord_dim = len(sizes)
+    # (N, d)
+    coord = torch.stack(
+        torch.meshgrid(
+            *[
+                # coordinate normalized to [0,1]
+                ((1 / 2 + torch.arange(s)) / s)
+                for s in sizes
+            ],
+            indexing='ij',
+        ),
+        dim=-1,
+    )
+
+    # (B, N, d)
+    coord = coord.reshape(N, coord_dim).repeat(B, 1, 1).to(image_features.device)
+    # (B, N)
+    idx_token = torch.arange(N)[None, :].repeat(B, 1)
+    # (B, N, 1)
+    agg_weight = image_features.new_ones(B, N, 1)
+
+    token_dict = {
+        "x": image_features,
+        "token_num": N,
+        "idx_token": idx_token,
+        "agg_weight": agg_weight,
+        "mask": None,
+        "coord": coord,
+    }
+
+    return token_dict
+
+
+class ImageTokenMergeClusterDPCKNN(nn.Module):
+    def __init__(self, sample_ratios, ks, coord_weight, coord_dim):
+        super().__init__()
+
+        self.sample_ratios = sample_ratios
+        self.ks = ks
+        self.coord_weight = coord_weight
+        self.coord_dim = coord_dim
+
+        # not really used anywhere
+        embed_dim = 1024
+        dim_out = 1024
+
+        self.ctms = nn.ModuleList()
+        self.tc_blocks = nn.ModuleList()
+
+        for sample_ratio, k in zip(sample_ratios, ks):
+            ctm = CTM(
+                sample_ratio=sample_ratio,
+                embed_dim=embed_dim,
+                dim_out=dim_out,
+                coord_weight=coord_weight,
+                k=k,
+            )
+            block = TCBlock(dim=dim_out, num_heads=8)
+            self.ctms.append(ctm)
+            self.tc_blocks.append(block)
+
+    def forward(self, image_features, token_dict=None):
+        """
+        `image_features`
+            (B*N, PH*PW, C)
+        Returns [token_list, token_list0, ...,]
+            a list of state, e.g., cluster membership, merged features etc. initially and after each layer.
+        """
+        if token_dict is None:
+            # assume square image or cubic video
+            if self.coord_dim == 1:
+                sizes = (image_features.shape[1],)
+            elif self.coord_dim == 2:
+                sizes = (int(math.sqrt(image_features.shape[1])),)*2
+            elif self.coord_dim == 3:
+                sizes = (int(image_features.shape[1] ** (1 / 3)),)*3
+            token_dict = create_token_dict_from_features(image_features, sizes)
+        token_dict_list = [token_dict]
+        for ctm, block in zip(self.ctms, self.tc_blocks):
+            # x: (B, N, D) -> (B, #clusters, D)
+            # coord: (B, N, coord_dim) -> (B, #clusters, coord_dim)
+            token_dict = block(ctm(token_dict))
+            token_dict_list.append(token_dict)
+        return token_dict_list
+
+    def __repr__(self):
+        return "".join(
+            [
+                "ImageTokenMergeClusterDPCKNN",
+                "(",
+                str(self.sample_ratios).replace(" ", "") + ",",
+                str(self.ks).replace(" ", "") + ",",
+                str(self.coord_weight),
+                str(self.coord_dim),
+                ")",
+            ]
+        )

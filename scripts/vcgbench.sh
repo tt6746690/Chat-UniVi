@@ -7,7 +7,7 @@ set -x
 trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
 
 
-MAX_IMAGE_LENGTH=16
+MAX_IMAGE_LENGTH=64
 
 CKPT=$1
 VIDEO_FOLDER=/fsx/wpq/.data/chatunivi/eval/Chat-UniVi-Eval/Test_Videos
