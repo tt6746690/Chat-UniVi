@@ -61,8 +61,16 @@ class ModelArguments:
     model_use: str = field(default="BASE")
     mm_use_box_start_end: bool = field(default=False)
 
-    # wpq:
-    coord_weight: float = field(default=0)
+    # wpq: place-holder to modify `model_config`
+    use_cluster: Optional[bool] = field(default=None)
+    freeze: Optional[bool] = field(default=None)
+    mm_tune: Optional[bool] = field(default=None)
+    vision_tune: Optional[float] = field(default=None)
+    spatial_cluster_rate0: Optional[float] = field(default=None)
+    spatial_cluster_rate1: Optional[float] = field(default=None)
+    spatial_cluster_rate2: Optional[float] = field(default=None)
+    temporal_cluster_rate: Optional[float] = field(default=None)
+    coord_weight: Optional[float] = field(default=None)
 
 
 @dataclass
@@ -1008,7 +1016,14 @@ def train():
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
-
+    # wpq: overwrite `model_config` kvs with `model_args`, 
+    # then make sure `model_args` contain default values from `model_config`.
+    model_config = copy.deepcopy(ModelConfig[str(model_args.model_use)])
+    for k in model_config:
+        if getattr(model_args, k, None) is not None:
+            print(f"[overwrite model_config from model_args]: {k} = {model_config[k]} -> {getattr(model_args, k)}")
+            model_config[k] = getattr(model_args, k)
+        setattr(model_args, k, model_config[k])
     # wpq: save args to a json file 
     from dataclasses import asdict
     with training_args.main_process_first(local=False, desc=f"Saving args to `{training_args.output_dir+'.args.json'}`"):
@@ -1016,7 +1031,7 @@ def train():
         args_dict_path = os.path.join(training_args.output_dir, 'args.json')
         with open(args_dict_path, 'w') as f:
             model_args_dict = copy.deepcopy(asdict(model_args))
-            model_args_dict['model_use_dict'] = ModelConfig[str(model_args.model_use)]
+            model_args_dict['model_use_dict'] = model_config
             data_args_dict = copy.deepcopy(asdict(data_args))
             data_args_dict['dataset_use_dict'] = DataConfig[str(data_args.dataset_use)]
             json.dump({
@@ -1197,29 +1212,30 @@ def train():
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
-        cluster_config = ModelConfig[str(model_args.model_use)]
+        # wpq: already instantiated in the beginning of the file.
+        # model_config = ModelConfig[str(model_args.model_use)]
         model.config.aarchitectures = "LlavaLlamaForCausalLM"
 
-        model.config.cluster_config = cluster_config
-        model.get_model().initialize_cluster_modules(cluster_config)
+        model.config.config = model_config
+        model.get_model().initialize_cluster_modules(model_config)
 
-        if model_args.use_cluster:
+        if model_config['use_cluster']:
             for n, p in model.named_parameters():
                 if "block" in n or "ctm" in n:
                     p.requires_grad = True
 
-        if model.config.config["freeze"]:
+        if model_config["freeze"]:
             for n, p in model.named_parameters():
                 if "block" not in n and "ctm" not in n:
                     p.requires_grad = False
 
-            if model.config.config["mm_tune"]:
+            if model_config["mm_tune"]:
                 for p in model.get_model().mm_projector.parameters():
                     p.requires_grad = True
 
-        model_args.vision_tune = cluster_config["vision_tune"]
         for p in model.get_vision_tower().parameters():
-            p.requires_grad = model_args.vision_tune
+            p.requires_grad = model_config["vision_tune"]
+
 
     params_need_grad = [n for n, p in model.named_parameters() if p.requires_grad]
     print("Parameters require gradients: {}".format(params_need_grad))

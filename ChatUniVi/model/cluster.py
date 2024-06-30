@@ -2,6 +2,7 @@ import torch
 import math
 import torch.nn as nn
 import warnings
+import collections
 
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
@@ -380,7 +381,6 @@ def create_token_dict_from_features(image_features, sizes=None):
     return token_dict
 
 
-
 class TokenMergeClusterDPCKNN(nn.Module):
     """Token merging with dpc-knn. Agnostic of dimension of features (e.g., 1d, image, video).
         but need to supply `self.forward` with properly constructed `token_dict`. """
@@ -473,3 +473,143 @@ class UnitTokenMergeClusterDPCKNN(TokenMergeClusterDPCKNN):
                 ")",
             ]
         )
+
+
+class VideoTokenMergeClusterDPCKNN(nn.Module):
+
+    def __init__(
+        self,
+        sample_ratios_temporal,
+        sample_ratios_spatial,
+        sample_ratios_video,
+        ks,
+        coord_weight_temporal,
+        coord_weight_spatial,
+        coord_weight_video,
+    ):
+        super().__init__()
+
+        self.sample_ratios_spatial = sample_ratios_spatial
+        self.sample_ratios_temporal = sample_ratios_temporal
+        self.ks = ks
+        self.coord_weight_spatial = coord_weight_spatial
+        self.coord_weight_temporal = coord_weight_temporal
+
+        self.token_merge_temporal = UnitTokenMergeClusterDPCKNN(
+            sample_ratios=sample_ratios_temporal,
+            ks=ks[:1],
+            coord_weight=coord_weight_temporal,
+            coord_dim=1,
+        )
+        self.token_merge_image = TokenMergeClusterDPCKNN(
+            sample_ratios=sample_ratios_spatial,
+            ks=ks,
+            coord_weight=coord_weight_spatial,
+        )
+        self.token_merge_video_list = torch.nn.ModuleList(
+            [
+                TokenMergeClusterDPCKNN(sample_ratios=[sample_ratio], ks=[k], coord_weight=coord_weight_video)
+                for sample_ratio, k in zip(sample_ratios_video, ks)
+            ]
+        )
+
+    def forward(self, image_features):
+        # `image_features`: (#frames, #patches, D)
+        _, P, D = image_features.shape
+        device = image_features.device
+
+        # token merging on each frame's global avg pool features
+        # cls_features: (1, #frames, D)
+        cls_features = torch.mean(image_features, dim=1, keepdim=False).unsqueeze(0).clone()
+        token_dict_temporal = self.token_merge_temporal(cls_features)[-1]
+
+        # [[event0_frame0, event0_frame1, ...], [evenet1_frame0, ...], ...]
+        events = collections.defaultdict(list)
+        for id, i in enumerate(token_dict_temporal["idx_token"][0].tolist()):
+            events[i].append(id)
+        events = list(events.values())
+        events = sorted(events, key=lambda x: x[0])
+
+        # token merging applied to each frame's patches independently.
+        # this is most likely to reduce the number of tokens before token merging in 3d.
+        # featues: (#frames, #patches, D) -> (#frames, #clusters, D)
+        # or (64, 576, 1024) -> (64, 64, 1024) -> (64, 32, 1024) -> (64, 16, 1024)
+        sizes = (int(math.sqrt(image_features.shape[1])),) * 2
+        token_dict = create_token_dict_from_features(image_features, sizes)
+        token_dict_image_list = self.token_merge_image(token_dict)[1:]
+
+        # t-dimension spacing is same as xy-dimension spacing.
+        num_frames_total = image_features.shape[0]
+        side_len = int(math.sqrt(image_features.shape[1]))
+        coord_z = (1 / 2 + torch.arange(0, num_frames_total, 1)) / side_len
+
+        ## iterate over events
+        token_dict_video_list = []
+        for event_frame_ids in events:
+
+            # number of patches in an event
+            num_frames = len(event_frame_ids)
+            Np_event = num_frames * P
+
+            ## iterate over token merging layers on video segments/events.
+            token_dict_event_list = []
+            for level in range(len(self.token_merge_video_list)):
+                token_merge_video = self.token_merge_video_list[level]
+                token_dict_frames = token_dict_image_list[level]
+
+                # number of clusters in a frame after per-frame token merging
+                Nc_frame = self.token_merge_image.sample_ratios[level]
+                # number of clusters in an event after per-frame token merging
+                N = num_frames * Nc_frame
+
+                # create token dict from result of frame-wise token merging
+                # (1, #frames*#clusters, D)
+                event_features = token_dict_frames["x"][event_frame_ids].reshape(N, D).unsqueeze(0)
+                # (1, #frames_in_event*#patches) convert per-frame index to per-event index, e.g., i-th frame's index added by i*#clusters
+                event_idx_token = token_dict_frames["idx_token"][event_frame_ids].reshape(Np_event)
+                event_idx_token = (
+                    torch.arange(num_frames, device=device).repeat_interleave(P) * Nc_frame + event_idx_token
+                )
+                event_idx_token = event_idx_token.unsqueeze(0)
+                # (1, #frames_in_event*#patches, 1)
+                event_agg_weight = token_dict_frames["agg_weight"][event_frame_ids].reshape(1, Np_event, 1)
+                # (1, #frames*#clusters, 3)
+                coord = torch.cat(
+                    (
+                        token_dict_frames["coord"][event_frame_ids],  # (#frames, #clusters, 2)
+                        coord_z[event_frame_ids][..., None, None].repeat(1, Nc_frame, 1),  # (#frames, #clusters, 1)
+                    ),
+                    dim=-1,
+                ).reshape(1, N, 3)
+
+                token_dict = {
+                    "x": event_features,
+                    "token_num": N,
+                    "idx_token": event_idx_token,
+                    "agg_weight": event_agg_weight,
+                    "mask": None,
+                    "coord": coord,
+                }
+
+                token_dict_video = token_merge_video(token_dict)[-1]
+                token_dict_event_list.append(token_dict_video)
+            token_dict_video_list.append(token_dict_event_list)
+
+
+        video_features = []
+        for token_dict_event_list in token_dict_video_list:
+            # (1, 64+32+16, 1024)
+            event_features = torch.cat([d["x"] for d in token_dict_event_list], dim=1)
+            video_features.append(event_features)
+        # (1, (64+32+16)*#frames, 1024)
+        video_features = torch.cat(video_features, dim=1)
+
+        outputs = {
+            "events": events,
+            "video_features": video_features,
+            "token_dict_temporal": token_dict_temporal,
+            "token_dict_image_list": token_dict_image_list,
+            "token_dict_video_list": token_dict_video_list,
+        }
+
+        return outputs

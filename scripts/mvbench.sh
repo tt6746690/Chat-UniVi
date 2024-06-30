@@ -8,7 +8,7 @@ trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
 
 
 CKPT=$1
-MAX_IMAGE_LENGTH=16 # default used by mvbench's paper.
+MAX_IMAGE_LENGTH=64 # default=16 used by mvbench's paper. but I'll keep at 64 since it's the number used for training.
 
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"

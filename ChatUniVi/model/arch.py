@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from .multimodal_encoder.builder import build_vision_tower
 from ChatUniVi.constants import *
-from .cluster import CTM, TCBlock, ImageTokenMergeClusterDPCKNN
+from .cluster import CTM, TCBlock, TokenMergeClusterDPCKNN, UnitTokenMergeClusterDPCKNN, VideoTokenMergeClusterDPCKNN
 from collections import OrderedDict
 import collections
 from .multimodal_projector.builder import build_vision_projector
@@ -18,8 +18,8 @@ class MetaModel:
             self.vision_tower = build_vision_tower(config, delay_load=True)
             self.mm_projector = nn.Linear(config.mm_hidden_size, config.hidden_size)
 
-        if hasattr(config, "cluster_config"):
-            self.initialize_cluster_modules(config.cluster_config)
+        if hasattr(config, "config"):
+            self.initialize_cluster_modules(config.config)
         else:
             self.use_cluster = False
 
@@ -59,24 +59,84 @@ class MetaModel:
 
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
 
-    def initialize_cluster_modules(self, cluster_config):
 
-        self.use_cluster = cluster_config["use_cluster"]
-        if self.use_cluster:
-            self.token_merge_image = ImageTokenMergeClusterDPCKNN(
-                sample_ratios=[cluster_config['spatial_cluster_rate0'],
-                               cluster_config['spatial_cluster_rate1'],
-                               cluster_config['model_args.spatial_cluster_rate2']],
-                ks=[5, 3, 3],
-                coord_weight=cluster_config['coord_weight'],
-                coord_dim=2,
-            )
-            self.token_merge_temporal = ImageTokenMergeClusterDPCKNN(
-                sample_ratios=[cluster_config['temporal_cluster_rate']],
-                ks=[5],
-                coord_weight=cluster_config['coord_weight'],
-                coord_dim=1,
-            )
+    def initialize_cluster_modules(self, model_config):
+        """
+            call the corresponding init function, 
+                e.g., if `model_config.cluster_type` is "v1", then calls 
+                    `self.initialize_cluster_modules_v1()`
+
+            assumes `model_config` contains ["use_cluster", "cluster_type"]
+        """
+
+        self.use_cluster = model_config["use_cluster"]
+        if not self.use_cluster:
+            return
+        self.cluster_type = model_config.get('cluster_type', 'v1')
+
+        method_name = f"initialize_cluster_modules_{self.cluster_type}"
+        if not getattr(self, method_name):
+            raise ValueError(f"[MetaModel.initialize_cluster_modules] {method_name} not supported.")
+
+        getattr(self, method_name)(model_config)
+
+    def initialize_cluster_modules_v1(self, model_config):
+        """handles both default model (chatunivi hf ckpt) & modified code with coord_weight. """
+
+        coord_weight = model_config.get("coord_weight", 0)
+
+        self.ctm0 = CTM(sample_ratio=model_config["spatial_cluster_rate0"], embed_dim=self.config.mm_hidden_size, dim_out=self.config.mm_hidden_size, k=5, coord_weight=coord_weight)
+        self.block0 = TCBlock(dim=self.config.mm_hidden_size, num_heads=8)
+
+        self.ctm1 = CTM(sample_ratio=model_config["spatial_cluster_rate1"], embed_dim=self.config.mm_hidden_size, dim_out=self.config.mm_hidden_size, k=3, coord_weight=coord_weight)
+        self.block1 = TCBlock(dim=self.config.mm_hidden_size, num_heads=8)
+
+        self.ctm2 = CTM(sample_ratio=model_config["spatial_cluster_rate2"], embed_dim=self.config.mm_hidden_size, dim_out=self.config.mm_hidden_size, k=3, coord_weight=coord_weight)
+        self.block2 = TCBlock(dim=self.config.mm_hidden_size, num_heads=8)
+
+        self.ctm3 = CTM(sample_ratio=model_config["temporal_cluster_rate"], embed_dim=self.config.mm_hidden_size, dim_out=self.config.mm_hidden_size, k=5, coord_weight=coord_weight)
+        self.block3 = TCBlock(dim=self.config.mm_hidden_size, num_heads=8)
+
+    def initialize_cluster_modules_v2(self, model_config):
+
+        sample_ratios_spatial = [
+            model_config['spatial_cluster_rate0'],
+            model_config['spatial_cluster_rate1'],
+            model_config['spatial_cluster_rate2'],
+        ]
+        sample_ratios_temporal = [model_config['temporal_cluster_rate']]
+        ks = [5, 3, 3]
+        coord_weight = model_config['coord_weight']
+        self.token_merge_image = UnitTokenMergeClusterDPCKNN(
+            sample_ratios=sample_ratios_spatial,
+            ks=ks,
+            coord_weight=coord_weight,
+            coord_dim=2,
+        )
+        self.token_merging_video = VideoTokenMergeClusterDPCKNN(
+            sample_ratios_temporal=[1/16],
+            sample_ratios_spatial=sample_ratios_spatial,
+            sample_ratios_video=sample_ratios_spatial,
+            ks=[5,3,3],
+            coord_weight_temporal=coord_weight,
+            coord_weight_spatial=coord_weight,
+            coord_weight_video=coord_weight,
+        )
+
+
+
+        # self.token_merge_image = ImageTokenMergeClusterDPCKNN(
+        #     sample_ratios=,
+        #     ks=[5, 3, 3],
+        #     coord_weight=cluster_config['coord_weight'],
+        #     coord_dim=2,
+        # )
+        # self.token_merge_temporal = ImageTokenMergeClusterDPCKNN(
+        #     sample_ratios=[cluster_config['temporal_cluster_rate']],
+        #     ks=[5],
+        #     coord_weight=cluster_config['coord_weight'],
+        #     coord_dim=1,
+        # )
 
 
 class ChatUniViMetaForCausalLM(ABC):
@@ -101,54 +161,40 @@ class ChatUniViMetaForCausalLM(ABC):
         x = x + p[:, :x.shape[1], :].to(x.device).to(x.dtype)
         return x
 
+
     def project(self, image_features, input_type="image"):
+        """
+            call the corresponding `project` function, 
+                e.g., if `self.get_model().cluster_type` is "v1", then calls 
+                    `self.project_v1()`
+        """
+        if not self.get_model().use_cluster:
+            if input_type == "video":
+                image_features, cls_features = torch.mean(image_features, dim=0, keepdim=False).unsqueeze(
+                    0), torch.mean(image_features, dim=1, keepdim=False).unsqueeze(0)
+                image_features = torch.cat([image_features, cls_features], dim=1)
+            image_features = self.get_model().mm_projector(image_features)
+            return image_features
+        
+        method_name = f"project_{self.get_model().cluster_type}"
+        if not getattr(self, method_name):
+            raise ValueError(f"[ChatUniViMetaForCausalLM.project] {method_name} not supported.")
+    
+        return getattr(self, method_name)(image_features, input_type=input_type)
 
 
-        if self.get_model().use_cluster:
-            if input_type == "image":
-                token_dict_list = self.get_model().token_merge_image(image_features)
-                # [(B, 64, C), (B, 32, C), (B, 16, C)]
-                cluster_image_features = [x['idx_token'] for x in token_dict_list][1:]
-                # multiscale features: (B, 112, C)
-                image_features = torch.cat(cluster_image_features, dim=1)
-                image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
-            else:
-                # image_features.shape:
-                # if input_type='video' then `image_features`: (38, 576, 1024) or (#frames, #patches, D)
-                # use batch dimension to hold all the frames in a video.
-
-                # cls_features: (1, 38, 1024) where num_frames=38
-                cls_features = torch.mean(image_features, dim=1, keepdim=False).unsqueeze(0).clone()
-                # cluster frames into events
-                token_dict_list = self.get_model().token_merge_temporal(cls_features)
-                down_dict = token_dict_list[-1]
-                # print({k: v.shape if isinstance(v, torch.Tensor) else v for k, v in down_dict.items()})
-                # {'x': torch.Size([1, 3, 1024]),  # 3 comes from 38 frames and 1/16 sampling rate -> 3 events
-                #  'token_num': 3,
-                #  'idx_token': torch.Size([1, 38]),
-                #  'agg_weight': torch.Size([1, 38, 1]),
-                #  'mask': None,
-                #  'coord': torch.Size([1, 3, 1]),
-                #  'index_down': torch.Size([1, 3]),
-                #  'idx_cluster': torch.Size([1, 38])}
-
-                # [[event0_frame0, event0_frame1, ...], [evenet1_frame0, ...], ...]
-                events = collections.defaultdict(list)
-                for id, i in enumerate(down_dict["idx_token"][0].tolist()):
-                    events[i].append(id)
-                events = list(events.values())
-                events = sorted(events, key=lambda x: x[0])
-
-
-                cluster_image_features = []
-                # assume square image. 576 -> 24
-                s = int(math.sqrt(image_features.shape[1]))
-                token_dict = {'x': image_features,
+    def project_v1(self, image_features, input_type="image"):
+        if input_type == "image":
+            # [(B, 64, C), (B, 32, C), (B, 16, C)]
+            cluster_image_features = []
+            # assume square image. 576 -> 24
+            s = int(math.sqrt(image_features.shape[1]))
+            token_dict = {'x': image_features,
                             'token_num': image_features.size(1),
                             'idx_token': torch.arange(image_features.size(1))[None, :].repeat(
                                 image_features.size(0), 1),
                             'agg_weight': image_features.new_ones(image_features.size(0), image_features.size(1),
-                                                                    1),
+                                                                1),
                             'mask': None,
                             'coord':  torch.stack(torch.meshgrid(
                                     torch.linspace(1/2, s-1/2, steps=s) / s,
@@ -157,115 +203,170 @@ class ChatUniViMetaForCausalLM(ABC):
                             ), dim=-1).reshape(image_features.size(1), 2).repeat(image_features.size(0), 1, 1).to(image_features.device),
                             }
 
-                token_dict0 = self.get_model().block0(self.get_model().ctm0(token_dict))
-                token_dict1 = self.get_model().block1(self.get_model().ctm1(token_dict0))
-                token_dict2 = self.get_model().block2(self.get_model().ctm2(token_dict1)) 
+            token_dict = self.get_model().block0(self.get_model().ctm0(token_dict))
+            cluster_image_features.append(token_dict["x"])
 
+            token_dict = self.get_model().block1(self.get_model().ctm1(token_dict))
+            cluster_image_features.append(token_dict["x"])
 
-                # (#frames,) or (38,)
-                # make spacing between patches across temporal dimension is same as that of xy dimension.
-                num_frames_total = image_features.shape[0]
-                coord_z = (1/2 + torch.arange(0, num_frames_total, 1)) / s
+            token_dict = self.get_model().block2(self.get_model().ctm2(token_dict))
+            cluster_image_features.append(token_dict["x"])
 
-                for id, event_frame_ids in enumerate(events):
-                    
-                    ## layer0 
+            # multiscale features: (B, 112, C)
+            image_features = torch.cat(cluster_image_features, dim=1)
+            image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
+        else:
+            # image_features.shape:
+            # if input_type='video' then `image_features`: (38, 576, 1024) or (#frames, #patches, D)
+            # use batch dimension to hold all the frames in a video.
 
-                    # token_dict['x']: (38, 64, 1024) or (#frames, #clusters, D)
-                    # cur_image_features0: (1, #frames_in_event*#clusters, 1024)
-                    cur_image_features0 = torch.cat([token_dict0["x"][i] for i in event_frame_ids], dim=0).unsqueeze(0)
-                    # note here `token_dict0['x']` is used instead of `token_dict['x']` most likely due to computational reasons. if not use features fater `block0/ctm0`, then would need 576*64=36,864 patch features to represent 64 frames, each 576 tokens/frame. the distance matrix would be 5gb.
-                    # maybe can just do a 2x2 pool here, or just use level=-1 as visual representation.
-                    # this way, the distance matrix would cost ((336/14/2)**2*64)**2*4 / 1024/1024/1024=0.32gb to store.
-                    token_dict = {
-                        'x': cur_image_features0,
-                        'token_num': cur_image_features0.size(1),
-                        'idx_token': torch.arange(cur_image_features0.size(1))[None, :].repeat(
-                            cur_image_features0.size(0), 1),
-                        'agg_weight': cur_image_features0.new_ones(cur_image_features0.size(0),
-                                                                    cur_image_features0.size(1),
-                                                            1),
+            # cls_features: (1, 38, 1024) where num_frames=38
+            cls_features = torch.mean(image_features, dim=1, keepdim=False).unsqueeze(0).clone()
+            s = cls_features.shape[1]
+            # cluster frames into events
+            token_dict = {'x': cls_features,
+                            'token_num': cls_features.size(1),
+                            'idx_token': torch.arange(cls_features.size(1))[None, :].repeat(
+                                cls_features.size(0), 1),
+                            'agg_weight': cls_features.new_ones(cls_features.size(0), cls_features.size(1),
+                                                                1),
+                            'mask': None,
+                            'coord': torch.stack(torch.meshgrid(
+                                torch.linspace(1/2, s-1/2, steps=s) / s,
+                            indexing='ij',
+                        ), dim=-1).reshape(cls_features.size(1), 1).repeat(cls_features.size(0), 1, 1).to(cls_features.device),
+                            }
+
+            down_dict, token_dict = self.get_model().ctm3(token_dict)
+            # print({k: v.shape if isinstance(v, torch.Tensor) else v for k, v in down_dict.items()})
+            # {'x': torch.Size([1, 3, 1024]),  # 3 comes from 38 frames and 1/16 sampling rate -> 3 events
+            #  'token_num': 3,
+            #  'idx_token': torch.Size([1, 38]),
+            #  'agg_weight': torch.Size([1, 38, 1]),
+            #  'mask': None,
+            #  'coord': torch.Size([1, 3, 1]),
+            #  'index_down': torch.Size([1, 3]),
+            #  'idx_cluster': torch.Size([1, 38])}
+
+            # [[event0_frame0, event0_frame1, ...], [evenet1_frame0, ...], ...]
+            events = collections.defaultdict(list)
+            for id, i in enumerate(down_dict["idx_token"][0].tolist()):
+                events[i].append(id)
+            events = list(events.values())
+            events = sorted(events, key=lambda x: x[0])
+
+            cluster_image_features = []
+            # assume square image. 576 -> 24
+            s = int(math.sqrt(image_features.shape[1]))
+            token_dict = {'x': image_features,
+                        'token_num': image_features.size(1),
+                        'idx_token': torch.arange(image_features.size(1))[None, :].repeat(
+                            image_features.size(0), 1),
+                        'agg_weight': image_features.new_ones(image_features.size(0), image_features.size(1),
+                                                                1),
                         'mask': None,
-                        # [(#clusters, 3) or (64, 3), ...] --cat--> (#cluster*#frames, 3)
-                            'coord': torch.cat([
-                                torch.cat((
-                                    token_dict0['coord'][idx_frame], # xy
-                                    token_dict0['coord'].new_ones((token_dict0['coord'].shape[1], 1)) * coord_z[idx_frame], # z
-                                ), dim=-1)
-                                for idx_frame in event_frame_ids
-                            ], dim=0)
+                        'coord':  torch.stack(torch.meshgrid(
+                                torch.linspace(1/2, s-1/2, steps=s) / s,
+                                torch.linspace(1/2, s-1/2, steps=s) / s,
+                            indexing='ij',
+                        ), dim=-1).reshape(image_features.size(1), 2).repeat(image_features.size(0), 1, 1).to(image_features.device),
                         }
 
-                    cur_token_dict0 = self.get_model().block0(self.get_model().ctm0(token_dict))
-                    # {'x': torch.Size([1, 64, 1024]), 'token_num': 64, 'idx_token': torch.Size([1, 640]), 'agg_weight': torch.Size([1, 640, 1]), 'mask': None, 'coord': torch.Size([1, 64, 3]), 'index_down': torch.Size([1, 64]), 'idx_cluster': torch.Size([1, 640])}
+            token_dict0 = self.get_model().block0(self.get_model().ctm0(token_dict))
+            token_dict1 = self.get_model().block1(self.get_model().ctm1(token_dict0))
+            token_dict2 = self.get_model().block2(self.get_model().ctm2(token_dict1)) 
 
-                    cluster_image_features.append(cur_token_dict0["x"])
 
-                    ## layer1
-                    cur_image_features1 = torch.cat([token_dict1["x"][i] for i in event_frame_ids], dim=0).unsqueeze(0)
-                    token_dict = {
-                        'x': cur_image_features1,
-                        'token_num': cur_image_features1.size(1),
-                        'idx_token': torch.arange(cur_image_features1.size(1))[None, :].repeat(
-                            cur_image_features1.size(0), 1),
-                        'agg_weight': cur_image_features1.new_ones(cur_image_features1.size(0),
-                                                                    cur_image_features1.size(1),
-                                                                    1),
-                        'mask': None,
-                        # [(#clusters, 3) or (64, 3), ...] --cat--> (#cluster*#frames, 3)
+            # (#frames,) or (38,)
+            # make spacing between patches across temporal dimension is same as that of xy dimension.
+            num_frames_total = image_features.shape[0]
+            coord_z = (1/2 + torch.arange(0, num_frames_total, 1)) / s
+
+            for id, event_frame_ids in enumerate(events):
+                
+                ## layer0 
+
+                # token_dict['x']: (38, 64, 1024) or (#frames, #clusters, D)
+                # cur_image_features0: (1, #frames_in_event*#clusters, 1024)
+                cur_image_features0 = torch.cat([token_dict0["x"][i] for i in event_frame_ids], dim=0).unsqueeze(0)
+                # note here `token_dict0['x']` is used instead of `token_dict['x']` most likely due to computational reasons. if not use features fater `block0/ctm0`, then would need 576*64=36,864 patch features to represent 64 frames, each 576 tokens/frame. the distance matrix would be 5gb.
+                # maybe can just do a 2x2 pool here, or just use level=-1 as visual representation.
+                # this way, the distance matrix would cost ((336/14/2)**2*64)**2*4 / 1024/1024/1024=0.32gb to store.
+                token_dict = {
+                    'x': cur_image_features0,
+                    'token_num': cur_image_features0.size(1),
+                    'idx_token': torch.arange(cur_image_features0.size(1))[None, :].repeat(
+                        cur_image_features0.size(0), 1),
+                    'agg_weight': cur_image_features0.new_ones(cur_image_features0.size(0),
+                                                                cur_image_features0.size(1),
+                                                        1),
+                    'mask': None,
+                    # [(#clusters, 3) or (64, 3), ...] --cat--> (#cluster*#frames, 3)
                         'coord': torch.cat([
                             torch.cat((
-                                token_dict1['coord'][idx_frame], # xy
-                                token_dict1['coord'].new_ones((token_dict1['coord'].shape[1], 1)) * coord_z[idx_frame], # z
+                                token_dict0['coord'][idx_frame], # xy
+                                token_dict0['coord'].new_ones((token_dict0['coord'].shape[1], 1)) * coord_z[idx_frame], # z
                             ), dim=-1)
                             for idx_frame in event_frame_ids
                         ], dim=0)
-                        }
+                    }
 
-                    cur_token_dict1 = self.get_model().block1(self.get_model().ctm1(token_dict))
-                    # {'x': torch.Size([1, 32, 1024]), 'token_num': 32, 'idx_token': torch.Size([1, 320]), 'agg_weight': torch.Size([1, 320, 1]), 'mask': None, 'coord': torch.Size([1, 32, 3]), 'index_down': torch.Size([1, 32]), 'idx_cluster': torch.Size([1, 320])}
-                    cluster_image_features.append(cur_token_dict1["x"])
+                cur_token_dict0 = self.get_model().block0(self.get_model().ctm0(token_dict))
+                # {'x': torch.Size([1, 64, 1024]), 'token_num': 64, 'idx_token': torch.Size([1, 640]), 'agg_weight': torch.Size([1, 640, 1]), 'mask': None, 'coord': torch.Size([1, 64, 3]), 'index_down': torch.Size([1, 64]), 'idx_cluster': torch.Size([1, 640])}
 
-                    cur_image_features2 = torch.cat([token_dict2["x"][i] for i in event_frame_ids], dim=0).unsqueeze(0)
-                    token_dict = {'x': cur_image_features2,
-                                  'token_num': cur_image_features2.size(1),
-                                  'idx_token': torch.arange(cur_image_features2.size(1))[None, :].repeat(
-                                      cur_image_features2.size(0), 1),
-                                  'agg_weight': cur_image_features2.new_ones(cur_image_features2.size(0),
-                                                                             cur_image_features2.size(1),
-                                                                             1),
-                                  'mask': None,
-                                # [(#clusters, 3) or (64, 3), ...] --cat--> (#cluster*#frames, 3)
-                                'coord': torch.cat([
-                                    torch.cat((
-                                        token_dict2['coord'][idx_frame], # xy
-                                        token_dict2['coord'].new_ones((token_dict2['coord'].shape[1], 1)) * coord_z[idx_frame], # z
-                                    ), dim=-1)
-                                    for idx_frame in event_frame_ids
-                                ], dim=0)
-                                  }
+                cluster_image_features.append(cur_token_dict0["x"])
 
-                    cur_token_dict2 = self.get_model().block2(self.get_model().ctm2(token_dict))
-                    cluster_image_features.append(cur_token_dict2["x"])
+                ## layer1
+                cur_image_features1 = torch.cat([token_dict1["x"][i] for i in event_frame_ids], dim=0).unsqueeze(0)
+                token_dict = {
+                    'x': cur_image_features1,
+                    'token_num': cur_image_features1.size(1),
+                    'idx_token': torch.arange(cur_image_features1.size(1))[None, :].repeat(
+                        cur_image_features1.size(0), 1),
+                    'agg_weight': cur_image_features1.new_ones(cur_image_features1.size(0),
+                                                                cur_image_features1.size(1),
+                                                                1),
+                    'mask': None,
+                    # [(#clusters, 3) or (64, 3), ...] --cat--> (#cluster*#frames, 3)
+                    'coord': torch.cat([
+                        torch.cat((
+                            token_dict1['coord'][idx_frame], # xy
+                            token_dict1['coord'].new_ones((token_dict1['coord'].shape[1], 1)) * coord_z[idx_frame], # z
+                        ), dim=-1)
+                        for idx_frame in event_frame_ids
+                    ], dim=0)
+                    }
 
-                # cat over 1. events 2. differnet levels within an event
-                # `image_features`: (1, (64+32+16)*#frames, 1024)
-                image_features = torch.cat(cluster_image_features, dim=1)
-                image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
-        else:
-            if input_type == "video":
-                image_features, cls_features = torch.mean(image_features, dim=0, keepdim=False).unsqueeze(
-                    0), torch.mean(image_features, dim=1, keepdim=False).unsqueeze(0)
-                image_features = torch.cat([image_features, cls_features], dim=1)
+                cur_token_dict1 = self.get_model().block1(self.get_model().ctm1(token_dict))
+                # {'x': torch.Size([1, 32, 1024]), 'token_num': 32, 'idx_token': torch.Size([1, 320]), 'agg_weight': torch.Size([1, 320, 1]), 'mask': None, 'coord': torch.Size([1, 32, 3]), 'index_down': torch.Size([1, 32]), 'idx_cluster': torch.Size([1, 320])}
+                cluster_image_features.append(cur_token_dict1["x"])
 
-        # import json, logging
-        # logging.info('project before mm_projector: ' + json.dumps({
-        #     'self.device': str(self.device),
-        #     'mm_projector.weight.device': str(self.get_model().mm_projector.weight.device),
-        #     'mm_projector.bias.device': str(self.get_model().mm_projector.bias.device),
-        #     'image_features.device': str(image_features.device),
-        # }, indent=4))
+                cur_image_features2 = torch.cat([token_dict2["x"][i] for i in event_frame_ids], dim=0).unsqueeze(0)
+                token_dict = {'x': cur_image_features2,
+                                'token_num': cur_image_features2.size(1),
+                                'idx_token': torch.arange(cur_image_features2.size(1))[None, :].repeat(
+                                    cur_image_features2.size(0), 1),
+                                'agg_weight': cur_image_features2.new_ones(cur_image_features2.size(0),
+                                                                            cur_image_features2.size(1),
+                                                                            1),
+                                'mask': None,
+                            # [(#clusters, 3) or (64, 3), ...] --cat--> (#cluster*#frames, 3)
+                            'coord': torch.cat([
+                                torch.cat((
+                                    token_dict2['coord'][idx_frame], # xy
+                                    token_dict2['coord'].new_ones((token_dict2['coord'].shape[1], 1)) * coord_z[idx_frame], # z
+                                ), dim=-1)
+                                for idx_frame in event_frame_ids
+                            ], dim=0)
+                                }
 
+                cur_token_dict2 = self.get_model().block2(self.get_model().ctm2(token_dict))
+                cluster_image_features.append(cur_token_dict2["x"])
+
+            # cat over 1. events 2. differnet levels within an event
+            # `image_features`: (1, (64+32+16)*#frames, 1024)
+            image_features = torch.cat(cluster_image_features, dim=1)
+            image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
 
         image_features = self.get_model().mm_projector(image_features)
         return image_features
