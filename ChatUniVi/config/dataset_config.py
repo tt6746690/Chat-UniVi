@@ -73,6 +73,13 @@ Pretrain_valley_llava = {
     "llava": "/fsx/wpq/.data/videollava/",
 }
 
+
+Pretrain_valley_llava_300k = {
+    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_llavaimage_existfiltered_300k.json",
+    "valley": "/fsx/wpq/.data/videollava/",
+    "llava": "/fsx/wpq/.data/videollava/",
+}
+
 LLaVA = {
     "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_tune.json",
     # following two get image/video from Video-LLaVA hf dataset repo.

@@ -26,10 +26,22 @@ model_config_finetune = {
 ## wpq: below are model config.
 
 model_config_v1 = {
+    "cluster_type": "v1",
     "use_cluster": True,
     "spatial_cluster_rate0": 64,  # 0.25
     "spatial_cluster_rate1": 32,  # 0.5
     "spatial_cluster_rate2": 16,  # 0.5
     "temporal_cluster_rate": 1/16,
     "coord_weight": 0,
+}
+
+
+model_config_v2 = {
+    "cluster_type": "v2",
+    "use_cluster": True,
+    "sample_ratios_temporal": [1/16],
+    "sample_ratios_spatial": [64, 32, 16],
+    "sample_ratios_video": [64, 32, 16],
+    "coord_weights": [0., 0., 0.],
+    "token_orderings": ['raster', 'default', 'default'],
 }

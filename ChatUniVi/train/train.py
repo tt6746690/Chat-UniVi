@@ -71,6 +71,13 @@ class ModelArguments:
     spatial_cluster_rate2: Optional[float] = field(default=None)
     temporal_cluster_rate: Optional[float] = field(default=None)
     coord_weight: Optional[float] = field(default=None)
+    sample_ratios_temporal: Optional[List[int]] = field(default=None)
+    sample_ratios_spatial: Optional[List[int]] = field(default=None)
+    sample_ratios_video: Optional[List[int]] = field(default=None)
+    coord_weights: Optional[List[float]] = field(default=None)
+    token_orderings: Optional[List[str]] = field(default=None)
+
+
 
 
 @dataclass

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from .multimodal_encoder.builder import build_vision_tower
 from ChatUniVi.constants import *
-from .cluster import CTM, TCBlock, TokenMergeClusterDPCKNN, UnitTokenMergeClusterDPCKNN, VideoTokenMergeClusterDPCKNN
+from .cluster import CTM, TCBlock, TokenMergeClusterDPCKNN, UnitTokenMergeClusterDPCKNN, VideoTokenMergeClusterDPCKNN, create_token_dict_from_features
 from collections import OrderedDict
 import collections
 from .multimodal_projector.builder import build_vision_projector
@@ -98,45 +98,15 @@ class MetaModel:
         self.block3 = TCBlock(dim=self.config.mm_hidden_size, num_heads=8)
 
     def initialize_cluster_modules_v2(self, model_config):
-
-        sample_ratios_spatial = [
-            model_config['spatial_cluster_rate0'],
-            model_config['spatial_cluster_rate1'],
-            model_config['spatial_cluster_rate2'],
-        ]
-        sample_ratios_temporal = [model_config['temporal_cluster_rate']]
         ks = [5, 3, 3]
-        coord_weight = model_config['coord_weight']
-        self.token_merge_image = UnitTokenMergeClusterDPCKNN(
-            sample_ratios=sample_ratios_spatial,
+        self.token_merging_model = VideoTokenMergeClusterDPCKNN(
+            sample_ratios_temporal=model_config['sample_ratios_temporal'],
+            sample_ratios_spatial=model_config['sample_ratios_spatial'],
+            sample_ratios_video=model_config['sample_ratios_video'],
             ks=ks,
-            coord_weight=coord_weight,
-            coord_dim=2,
+            coord_weights=model_config['coord_weights'],
+            token_orderings=model_config['token_orderings'],
         )
-        self.token_merging_video = VideoTokenMergeClusterDPCKNN(
-            sample_ratios_temporal=[1/16],
-            sample_ratios_spatial=sample_ratios_spatial,
-            sample_ratios_video=sample_ratios_spatial,
-            ks=[5,3,3],
-            coord_weight_temporal=coord_weight,
-            coord_weight_spatial=coord_weight,
-            coord_weight_video=coord_weight,
-        )
-
-
-
-        # self.token_merge_image = ImageTokenMergeClusterDPCKNN(
-        #     sample_ratios=,
-        #     ks=[5, 3, 3],
-        #     coord_weight=cluster_config['coord_weight'],
-        #     coord_dim=2,
-        # )
-        # self.token_merge_temporal = ImageTokenMergeClusterDPCKNN(
-        #     sample_ratios=[cluster_config['temporal_cluster_rate']],
-        #     ks=[5],
-        #     coord_weight=cluster_config['coord_weight'],
-        #     coord_dim=1,
-        # )
 
 
 class ChatUniViMetaForCausalLM(ABC):
@@ -181,6 +151,22 @@ class ChatUniViMetaForCausalLM(ABC):
             raise ValueError(f"[ChatUniViMetaForCausalLM.project] {method_name} not supported.")
     
         return getattr(self, method_name)(image_features, input_type=input_type)
+
+
+    def project_v2(self, image_features, input_type="image"):
+        if input_type == "image":
+            sizes = (int(math.sqrt(image_features.shape[1])),) * 2
+            token_dict = create_token_dict_from_features(image_features, sizes)
+            token_dict_image_list = self.get_model().token_merging_model.token_merge_image(token_dict)[1:]
+            # multiscale features: (B, 112, C)
+            image_features = torch.cat([d['x'] for d in token_dict_image_list], dim=1)
+        else:            
+            outputs = self.get_model().token_merging_model(image_features)
+            image_features = torch.cat([torch.cat([d['x'] for d in l], dim=1) for l in outputs['token_dict_video_list']], dim=1)
+
+        image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
+        image_features = self.get_model().mm_projector(image_features)
+        return image_features
 
 
     def project_v1(self, image_features, input_type="image"):
