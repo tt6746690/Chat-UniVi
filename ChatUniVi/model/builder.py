@@ -8,6 +8,7 @@ from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 
+
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto"):
     kwargs = {"device_map": device_map}
 
@@ -106,6 +107,10 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         if not vision_tower.is_loaded:
             vision_tower.load_model()
             vision_tower.to(device='cuda', dtype=torch.float16)
+
+        if model.config.config["use_cluster"]:
+            for n, m in model.named_modules():
+                m = m.to(dtype=torch.bfloat16)
 
         image_processor = vision_tower.image_eval_processor
 

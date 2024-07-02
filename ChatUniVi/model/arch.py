@@ -154,16 +154,17 @@ class ChatUniViMetaForCausalLM(ABC):
 
 
     def project_v2(self, image_features, input_type="image"):
+        # import pdb; pdb.set_trace()
+
         if input_type == "image":
             sizes = (int(math.sqrt(image_features.shape[1])),) * 2
             token_dict = create_token_dict_from_features(image_features, sizes)
             token_dict_image_list = self.get_model().token_merging_model.token_merge_image(token_dict)[1:]
             # multiscale features: (B, 112, C)
             image_features = torch.cat([d['x'] for d in token_dict_image_list], dim=1)
-        else:            
+        else:
             outputs = self.get_model().token_merging_model(image_features)
             image_features = torch.cat([torch.cat([d['x'] for d in l], dim=1) for l in outputs['token_dict_video_list']], dim=1)
-
         image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
         image_features = self.get_model().mm_projector(image_features)
         return image_features
@@ -633,5 +634,5 @@ class ChatUniViMetaForCausalLM(ABC):
                 for p in self.get_input_embeddings().parameters():
                     p.requires_grad = False
                 for p in self.get_output_embeddings().parameters():
-                    p.requires_grad = Fals
+                    p.requires_grad = False
                     

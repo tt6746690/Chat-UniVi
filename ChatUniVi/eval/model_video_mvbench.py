@@ -149,26 +149,6 @@ def eval_model(args):
     model_name = get_model_name_from_path(args.model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
 
-    mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
-    mm_use_im_patch_token = getattr(model.config, "mm_use_im_patch_token", True)
-    if mm_use_im_patch_token:
-        tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
-    if mm_use_im_start_end:
-        tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
-    model.resize_token_embeddings(len(tokenizer))
-
-    vision_tower = model.get_vision_tower()
-    if not vision_tower.is_loaded:
-        vision_tower.load_model()
-    image_processor = vision_tower.image_processor
-
-    if model.config.config["use_cluster"]:
-        for n, m in model.named_modules():
-            m = m.to(dtype=torch.bfloat16)
-    
-    device = 'cuda'
-    model = model.to(device)
-
     dataset = EvalDatasetMvBench(args.question_dir, args.video_folder, image_processor, mvbench_data_list, args.num_chunks, args.chunk_idx)
     dataloader = DataLoader(dataset, batch_size=1, num_workers=8)
 
@@ -203,16 +183,6 @@ def eval_model(args):
         images = torch.cat(video_frames, dim=0).half().to(device)
 
         with torch.inference_mode():
-
-            # import json, logging
-            # logging.info('before model.generate: '+ json.dumps({
-            #     'self.device': str(model.device),
-            #     'mm_projector.device': str(model.get_model().mm_projector.weight.device),
-            #     'embed_tokens.device': str(model.get_model().embed_tokens.weight.device),
-            #     'input_ids.device': str(input_ids.device),
-            #     'images.device': str(images.device),
-            # }, indent=4))
-
             output_ids = model.generate(
                 input_ids,
                 images=images,

@@ -201,9 +201,13 @@ def main():
     for file_name in os.listdir(output_dir):
         if file_name.endswith(".json"):
             file_path = os.path.join(output_dir, file_name)
-            with open(file_path, "r") as json_file:
-                content = json.load(json_file)
-                combined_contents[file_name[:-5]] = content
+            try:
+                with open(file_path, "r") as json_file:
+                    content = json.load(json_file)
+                    combined_contents[file_name[:-5]] = content
+            except Exception as e:
+                print(f'file cannot be read: {file_path}')
+                raise
 
     # Write combined content to a json file
     with open(json_path, "w") as json_file:

@@ -343,7 +343,7 @@ class CTM(nn.Module):
 
         return down_dict, token_dict
 
-
+ 
 class TCBlock(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, sr_ratio=1, use_sr_layer=False):
@@ -545,6 +545,7 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
         )
 
     def forward(self, image_features):
+        
         # `image_features`: (#frames, #patches, D)
         _, P, D = image_features.shape
         device = image_features.device
