@@ -45,3 +45,14 @@ model_config_v2 = {
     "coord_weights": [0., 0., 0.],
     "token_orderings": ['raster', 'default', 'default'],
 }
+
+
+model_config_v3 = {
+    "cluster_type": "v3",
+    "use_cluster": True,
+    "sample_ratios_spatial": [64, 32, 16],
+    "sample_ratios_video": [64, 32, 16],
+    "coord_weights": [0, 0],
+    "token_orderings": ["default", "default"],
+}
+

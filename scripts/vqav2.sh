@@ -13,31 +13,35 @@ gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 CHUNKS=${#GPULIST[@]}
 
-for IDX in $(seq 0 $((CHUNKS-1))); do
-    CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_vqa_loader \
-        --model-path $CKPT \
-        --question-file $EVAL_DATA_DIR/$SPLIT.jsonl \
-        --image-folder $EVAL_DATA_DIR/test2015 \
-        --answers-file $CKPT/eval/vqav2/$SPLIT/answers/${CHUNKS}_${IDX}.jsonl \
-        --num-chunks $CHUNKS \
-        --chunk-idx $IDX \
-        --temperature 0 \
-        --conv-mode $CONV_MODE &
-done
+if [[ ! -f "$CKPT/eval/vqav2/$SPLIT/answers/merge.jsonl" ]]; then
 
-wait
+    for IDX in $(seq 0 $((CHUNKS-1))); do
+        CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_vqa_loader \
+            --model-path $CKPT \
+            --question-file $EVAL_DATA_DIR/$SPLIT.jsonl \
+            --image-folder $EVAL_DATA_DIR/test2015 \
+            --answers-file $CKPT/eval/vqav2/$SPLIT/answers/${CHUNKS}_${IDX}.jsonl \
+            --num-chunks $CHUNKS \
+            --chunk-idx $IDX \
+            --temperature 0 \
+            --conv-mode $CONV_MODE &
+    done
 
-output_file=$CKPT/eval/vqav2/$SPLIT/answers/merge.jsonl
+    wait
 
-echo $output_file
+    output_file=$CKPT/eval/vqav2/$SPLIT/answers/merge.jsonl
 
-# Clear out the output file if it exists.
-> "$output_file"
+    echo $output_file
 
-# Loop through the indices and concatenate each file.
-for IDX in $(seq 0 $((CHUNKS-1))); do
-    cat $CKPT/eval/vqav2/$SPLIT/answers/${CHUNKS}_${IDX}.jsonl >> "$output_file"
-done
+    # Clear out the output file if it exists.
+    > "$output_file"
+
+    # Loop through the indices and concatenate each file.
+    for IDX in $(seq 0 $((CHUNKS-1))); do
+        cat $CKPT/eval/vqav2/$SPLIT/answers/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+    done
+
+fi
 
 python -m ChatUniVi.eval.convert_vqav2_for_submission --src "$output_file" --dst $CKPT/eval/vqav2/$SPLIT/answers_upload.json --test_split $EVAL_DATA_DIR/llava_vqav2_mscoco_test2015.jsonl
 

@@ -74,8 +74,10 @@ class ModelArguments:
     sample_ratios_temporal: Optional[List[int]] = field(default=None)
     sample_ratios_spatial: Optional[List[int]] = field(default=None)
     sample_ratios_video: Optional[List[int]] = field(default=None)
+    sample_ratios: Optional[List[int]] = field(default=None)
     coord_weights: Optional[List[float]] = field(default=None)
     token_orderings: Optional[List[str]] = field(default=None)
+    token_ordering: Optional[str] = field(default=None)
 
 
 

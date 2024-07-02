@@ -146,11 +146,14 @@ def eval_model(args):
     # Model
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
-    model_name = get_model_name_from_path(args.model_path)
+    # model_name = get_model_name_from_path(args.model_path)
+    model_name = "ChatUniVi"
     tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
 
     dataset = EvalDatasetMvBench(args.question_dir, args.video_folder, image_processor, mvbench_data_list, args.num_chunks, args.chunk_idx)
     dataloader = DataLoader(dataset, batch_size=1, num_workers=8)
+
+    device = 'cuda'
 
     for (idx, sample_set, video_frames, slice_len) in tqdm(dataloader):
         idx, sample_set, video_frames, slice_len = int(idx[0]), sample_set[

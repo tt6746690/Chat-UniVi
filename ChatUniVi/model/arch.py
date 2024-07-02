@@ -98,6 +98,7 @@ class MetaModel:
         self.block3 = TCBlock(dim=self.config.mm_hidden_size, num_heads=8)
 
     def initialize_cluster_modules_v2(self, model_config):
+        """Replicate original implementation myself. """
         ks = [5, 3, 3]
         self.token_merging_model = VideoTokenMergeClusterDPCKNN(
             sample_ratios_temporal=model_config['sample_ratios_temporal'],
@@ -107,6 +108,28 @@ class MetaModel:
             coord_weights=model_config['coord_weights'],
             token_orderings=model_config['token_orderings'],
         )
+
+    def initialize_cluster_modules_v3(self, model_config):
+        """ 1 single 3d token merging module """
+        coord_weight_spatial, coord_weight_video = model_config["coord_weights"]
+        token_ordering_spatial, token_ordering_video = model_config["token_orderings"]
+        sample_ratios_spatial = model_config['sample_ratios_spatial']
+        sample_ratios_video = model_config['sample_ratios_video']
+        ks = [5,3,3]
+        self.token_merge_image = TokenMergeClusterDPCKNN(
+            sample_ratios=sample_ratios_spatial,
+            ks=ks[:len(sample_ratios_spatial)],
+            coord_weight=coord_weight_spatial,
+            token_ordering=token_ordering_spatial,
+        )
+        self.token_merging_video = TokenMergeClusterDPCKNN(
+            sample_ratios=sample_ratios_video,
+            ks=ks[:len(sample_ratios_video)],
+            coord_weight=coord_weight_video,
+            token_ordering=token_ordering_video,
+        )
+
+
 
 
 class ChatUniViMetaForCausalLM(ABC):
@@ -150,12 +173,27 @@ class ChatUniViMetaForCausalLM(ABC):
         if not getattr(self, method_name):
             raise ValueError(f"[ChatUniViMetaForCausalLM.project] {method_name} not supported.")
     
-        return getattr(self, method_name)(image_features, input_type=input_type)
+        image_features = getattr(self, method_name)(image_features, input_type=input_type)
+        image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
+        image_features = self.get_model().mm_projector(image_features)
+        return image_features
+
+
+    def project_v3(self, image_features, input_type="image"):
+        if input_type == "image":
+            sizes = (int(math.sqrt(image_features.shape[1])),) * 2
+            token_dict = create_token_dict_from_features(image_features, sizes)
+            token_dict_list = self.get_model().token_merge_image(token_dict)[1:]
+            image_features = torch.cat([d['x'] for d in token_dict_list], dim=1)
+        else:
+            sizes = (image_features.shape[0],) + (int(image_features.shape[1] ** (1 / 2)),)*2
+            token_dict = create_token_dict_from_features(image_features.reshape(1, -1, image_features.shape[-1]), sizes)
+            token_dict_list = self.get_model().token_merging_video(token_dict)[1:]
+            image_features = torch.cat([d['x'] for d in token_dict_list], dim=1)
+        return image_features
 
 
     def project_v2(self, image_features, input_type="image"):
-        # import pdb; pdb.set_trace()
-
         if input_type == "image":
             sizes = (int(math.sqrt(image_features.shape[1])),) * 2
             token_dict = create_token_dict_from_features(image_features, sizes)
@@ -165,8 +203,6 @@ class ChatUniViMetaForCausalLM(ABC):
         else:
             outputs = self.get_model().token_merging_model(image_features)
             image_features = torch.cat([torch.cat([d['x'] for d in l], dim=1) for l in outputs['token_dict_video_list']], dim=1)
-        image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
-        image_features = self.get_model().mm_projector(image_features)
         return image_features
 
 
@@ -201,7 +237,6 @@ class ChatUniViMetaForCausalLM(ABC):
 
             # multiscale features: (B, 112, C)
             image_features = torch.cat(cluster_image_features, dim=1)
-            image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
         else:
             # image_features.shape:
             # if input_type='video' then `image_features`: (38, 576, 1024) or (#frames, #patches, D)
@@ -353,9 +388,7 @@ class ChatUniViMetaForCausalLM(ABC):
             # cat over 1. events 2. differnet levels within an event
             # `image_features`: (1, (64+32+16)*#frames, 1024)
             image_features = torch.cat(cluster_image_features, dim=1)
-            image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
 
-        image_features = self.get_model().mm_projector(image_features)
         return image_features
 
     def prepare_inputs_labels_for_multimodal(

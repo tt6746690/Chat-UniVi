@@ -89,35 +89,35 @@ fi
 
 
 echo "Category: Correctness of Information"
-python -m ChatUniVi.eval.evaluate.benchmark_1_correctness \
+python -m ChatUniVi.eval.evaluate.evaluate_benchmark_1_correctness \
     --pred_path $CKPT/eval/vcgbench/answers-generic/merge.jsonl \
     --output_dir $CKPT/eval/vcgbench/correctness \
     --output_json $CKPT/eval/vcgbench/correctness/merge.jsonl \
     --num_tasks $NUM_TASKS_GPT_EVAL
 
 echo "Category: Detail Orientation"
-python -m ChatUniVi.eval.evaluate.benchmark_2_detailed_orientation \
+python -m ChatUniVi.eval.evaluate.evaluate_benchmark_2_detailed_orientation \
     --pred_path $CKPT/eval/vcgbench/answers-generic/merge.jsonl \
     --output_dir $CKPT/eval/vcgbench/detailed_orientation \
     --output_json $CKPT/eval/vcgbench/detailed_orientation/merge.jsonl \
     --num_tasks $NUM_TASKS_GPT_EVAL
 
 echo "Category: Contextual Understanding"
-python -m ChatUniVi.eval.evaluate.benchmark_3_context \
+python -m ChatUniVi.eval.evaluate.evaluate_benchmark_3_context \
     --pred_path $CKPT/eval/vcgbench/answers-generic/merge.jsonl \
     --output_dir $CKPT/eval/vcgbench/context \
     --output_json $CKPT/eval/vcgbench/context/merge.jsonl \
     --num_tasks $NUM_TASKS_GPT_EVAL
 
 echo "Category: Temporal Understanding"
-python -m ChatUniVi.eval.evaluate.benchmark_4_temporal \
+python -m ChatUniVi.eval.evaluate.evaluate_benchmark_4_temporal \
     --pred_path $CKPT/eval/vcgbench/answers-temporal/merge.jsonl \
     --output_dir $CKPT/eval/vcgbench/temporal \
     --output_json $CKPT/eval/vcgbench/temporal/merge.jsonl \
     --num_tasks $NUM_TASKS_GPT_EVAL
 
 echo "Category: Consistency"
-python -m ChatUniVi.eval.evaluate.benchmark_5_consistency \
+python -m ChatUniVi.eval.evaluate.evaluate_benchmark_5_consistency \
     --pred_path $CKPT/eval/vcgbench/answers-consistency/merge.jsonl \
     --output_dir $CKPT/eval/vcgbench/consistency \
     --output_json $CKPT/eval/vcgbench/consistency/merge.jsonl \

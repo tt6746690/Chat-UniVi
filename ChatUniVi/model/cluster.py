@@ -283,12 +283,15 @@ def order_tokens(token_dict, token_ordering='default'):
         idx_token = token_dict['idx_token']
         # `agg_weight`: assigned to the input tokens, agnostic of cluster id so don't need to change anything.
 
-        # maps multi-dimensional coordinate [x,y,z] -> x+y*10+z*100 for sorting. 
         if token_ordering == 'random':
             coord_flat_to_1d = torch.rand_like(coord)
         elif token_ordering == 'raster':
             coord_flat_to_1d = coord
-        coord_flat_to_1d = torch.stack([(10**di)*coord_flat_to_1d[...,di] for di in range(coord.shape[-1])], dim=-1).sum(dim=-1)
+        
+        # maps multi-dimensional coordinate [z,y,x] -> z*100+10*y+x for sorting.
+        coord_flat_to_1d = torch.stack([(10**(coord.shape[-1]-di-1))*coord_flat_to_1d[...,di] for di in range(coord.shape[-1])], dim=-1).sum(dim=-1)
+        # maps multi-dimensional coordinate [x,y,z] -> x+y*10+z*100 for sorting. wrong ordering!
+        # coord_flat_to_1d = torch.stack([(10**(coord.shape[-1]-di))*coord_flat_to_1d[...,di] for di in range(coord.shape[-1])], dim=-1).sum(dim=-1)
         # [new_cluster_id: old_cluster_id]
         inds = torch.argsort(coord_flat_to_1d, dim=-1, descending=False)
         # [old_cluster_id: new_cluster_id]
@@ -608,8 +611,8 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
                 # (1, #frames*#clusters, 3)
                 coord = torch.cat(
                     (
-                        token_dict_frames["coord"][event_frame_ids],  # (#frames, #clusters, 2)
                         coord_z[event_frame_ids][..., None, None].repeat(1, Nc_frame, 1),  # (#frames, #clusters, 1)
+                        token_dict_frames["coord"][event_frame_ids],  # (#frames, #clusters, 2)
                     ),
                     dim=-1,
                 ).reshape(1, N, 3)
