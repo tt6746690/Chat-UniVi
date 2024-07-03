@@ -78,6 +78,8 @@ class ModelArguments:
     coord_weights: Optional[List[float]] = field(default=None)
     token_orderings: Optional[List[str]] = field(default=None)
     token_ordering: Optional[str] = field(default=None)
+    prune_ratios_spatial: Optional[List[int]] = field(default=None)
+    prune_ratios_video: Optional[List[int]] = field(default=None)
 
 
 

@@ -269,51 +269,80 @@ def merge_tokens(token_dict, idx_cluster, cluster_num, token_weight=None):
     return out_dict
 
 
-def order_tokens(token_dict, token_ordering='default'):
+def order_tokens(token_dict, token_ordering="default"):
     """sort cluster id according to some criterion.
-        e.g., if `token_ordering` is "raster", then smaller cluster idx has small (x,y,z) coord.
+    e.g., if `token_ordering` is "raster", then smaller cluster idx has small (x,y,z) coord.
     """
-    
-    if token_ordering == 'default':
+
+    if token_ordering == "default":
         return token_dict
-    elif token_ordering in ('raster', 'random'):
+    elif token_ordering in ("raster", "random", "clustersize"):
         # x, coord
-        coord = token_dict['coord']
-        x = token_dict['x']
-        idx_token = token_dict['idx_token']
+        coord = token_dict["coord"]
+        x = token_dict["x"]
+        idx_token = token_dict["idx_token"]
         # `agg_weight`: assigned to the input tokens, agnostic of cluster id so don't need to change anything.
 
-        if token_ordering == 'random':
-            coord_flat_to_1d = torch.rand_like(coord)
-        elif token_ordering == 'raster':
-            coord_flat_to_1d = coord
-        
-        # maps multi-dimensional coordinate [z,y,x] -> z*100+10*y+x for sorting.
-        coord_flat_to_1d = torch.stack([(10**(coord.shape[-1]-di-1))*coord_flat_to_1d[...,di] for di in range(coord.shape[-1])], dim=-1).sum(dim=-1)
-        # maps multi-dimensional coordinate [x,y,z] -> x+y*10+z*100 for sorting. wrong ordering!
-        # coord_flat_to_1d = torch.stack([(10**(coord.shape[-1]-di))*coord_flat_to_1d[...,di] for di in range(coord.shape[-1])], dim=-1).sum(dim=-1)
+        # sort_score: (B, N)
+        if token_ordering == "random":
+            sort_score = torch.rand_like(coord[...,0])
+        elif token_ordering == "raster":
+            # maps multi-dimensional coordinate [z,y,x] -> z*100+10*y+x for sorting.
+            sort_score = torch.stack(
+                [(10 ** (coord.shape[-1] - di - 1)) * coord[..., di] for di in range(coord.shape[-1])], dim=-1
+            ).sum(dim=-1)
+            # maps multi-dimensional coordinate [x,y,z] -> x+y*10+z*100 for sorting. wrong ordering!
+            # sort_score = torch.stack([(10**(coord.shape[-1]-di))*coord[...,di] for di in range(coord.shape[-1])], dim=-1).sum(dim=-1)
+        elif token_ordering == 'clustersize':
+            # larger cluster size earlier in the ordering
+            cluster_sizes = torch.stack([i.unique(return_counts=True)[1] for i in idx_token])
+            sort_score = -cluster_sizes
         # [new_cluster_id: old_cluster_id]
-        inds = torch.argsort(coord_flat_to_1d, dim=-1, descending=False)
+        inds = torch.argsort(sort_score, dim=-1, descending=False)
         # [old_cluster_id: new_cluster_id]
         inds_reverse = torch.argsort(inds, dim=-1)
 
-        token_dict['x'] = torch.take_along_dim(x, inds[...,None].repeat(1, 1, x.shape[-1]), dim=1).reshape_as(x)
-        token_dict['coord'] = torch.take_along_dim(coord, inds[...,None].repeat(1, 1, coord.shape[-1]), dim=1).reshape_as(coord)
-        token_dict['idx_token'] = index_points(inds_reverse[...,None], idx_token).reshape_as(idx_token)
+        token_dict["x"] = torch.take_along_dim(x, inds[..., None].repeat(1, 1, x.shape[-1]), dim=1).reshape_as(x)
+        token_dict["coord"] = torch.take_along_dim(
+            coord, inds[..., None].repeat(1, 1, coord.shape[-1]), dim=1
+        ).reshape_as(coord)
+        token_dict["idx_token"] = index_points(inds_reverse[..., None], idx_token).reshape_as(idx_token)
 
         return token_dict
     else:
-        raise ValueError(f'Invalid token_ordering={token_ordering}')
+        raise ValueError(f"Invalid token_ordering={token_ordering}")
+
+
+def take_firstn_clusters(token_dict, n=None):
+    """Takes first `n` cluster in `token_dict`. """
+    if n is None:
+        return token_dict
+
+    out_dict = {}
+    out_dict['x'] = token_dict['x'][:, :n, :]
+    out_dict['token_num'] = n
+    idx_token = token_dict['idx_token']
+    # random assign clusters that are too small.
+    mask = idx_token >= n
+    idx_token[mask] = torch.randint(0, n, size=(torch.sum(mask),), device=idx_token.device)
+    out_dict['idx_token'] = idx_token
+    out_dict['agg_weight'] = token_dict['agg_weight'] # not used anywhere
+    out_dict['mask'] = token_dict['mask']
+    out_dict['coord'] = token_dict['coord'][:, :n, :]
+
+    return out_dict
+
 
 
 class CTM(nn.Module):
-    def __init__(self, sample_ratio, embed_dim, dim_out, k=5, coord_weight=0, token_ordering='default'):
+    def __init__(self, sample_ratio, embed_dim, dim_out, k=5, coord_weight=0, token_ordering="default", prune_ratio=None):
         super().__init__()
         self.sample_ratio = sample_ratio
         self.dim_out = dim_out
         self.k = k
         self.coord_weight = coord_weight
         self.token_ordering = token_ordering
+        self.prune_ratio = prune_ratio
 
     def forward(self, token_dict, sample_ratio=None):
 
@@ -325,37 +354,71 @@ class CTM(nn.Module):
         if token_dict["mask"] is not None:
             token_weight.masked_fill_((1 - token_dict["mask"]).to(torch.bool), float("-inf"))
         token_weight = token_weight.unsqueeze(2)
-        token_dict['x'] = x
+        token_dict["x"] = x
 
         if sample_ratio is not None:
-            cluster_num = max(math.ceil(N * sample_ratio), 1)
+            cluster_num = max(math.ceil(N * sample_ratio), 1)  # (t,)
         elif self.sample_ratio > 1:
-            cluster_num = max(math.ceil(self.sample_ratio), 1)
+            cluster_num = max(math.ceil(self.sample_ratio), 1)  # (h,w)
         else:
-            cluster_num = max(math.ceil(N * self.sample_ratio), 1)
+            cluster_num = max(math.ceil(N * self.sample_ratio), 1)  # (t,h,w)
 
-        k = min(3, max(cluster_num//2, 1)) if self.k > cluster_num else self.k
+        if self.prune_ratio is None or self.prune_ratio <= 0:
+            prune_num = 0
+        else:
+            if self.prune_ratio >= 1:
+                prune_num = max(math.ceil(self.prune_ratio), 1)
+            else:
+                prune_num = max(math.ceil(N * self.prune_ratio), 1)
+        
+        k = min(3, max(cluster_num // 2, 1)) if self.k > cluster_num else self.k
 
-        token_coord = token_dict['coord'] if 'coord' in token_dict else None
-        idx_cluster, cluster_num, index_down = cluster_dpc_knn(
-            token_dict, cluster_num, k, token_mask=token_dict["mask"], token_coord=token_coord, coord_weight=self.coord_weight)
+        token_coord = token_dict["coord"] if "coord" in token_dict else None
+        idx_cluster, _, _ = cluster_dpc_knn(
+            token_dict,
+            cluster_num+prune_num,
+            k,
+            token_mask=token_dict["mask"],
+            token_coord=token_coord,
+            coord_weight=self.coord_weight,
+        )
 
-        down_dict = merge_tokens(token_dict, idx_cluster, cluster_num, token_weight)
+        down_dict = merge_tokens(token_dict, idx_cluster, cluster_num+prune_num, token_weight)
+
+        if prune_num != 0:
+            down_dict = order_tokens(down_dict, token_ordering="clustersize")
+            down_dict = take_firstn_clusters(down_dict, n=cluster_num)
 
         down_dict = order_tokens(down_dict, self.token_ordering)
 
+        down_dict['idx_cluster'] = idx_cluster
+
         return down_dict, token_dict
 
- 
+
 class TCBlock(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, sr_ratio=1, use_sr_layer=False):
+    
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        qk_scale=None,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        sr_ratio=1,
+        use_sr_layer=False,
+    ):
         super().__init__()
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -378,7 +441,7 @@ class TCBlock(nn.Module):
 
 def create_token_dict_from_features(image_features, sizes=None):
     """Create `token_dict` as input to clustering layers.
-        If `sizes` is None, then `image_features` assumed to be 1d signal.
+    If `sizes` is None, then `image_features` assumed to be 1d signal.
     """
 
     B, N, D = image_features.shape
@@ -391,7 +454,7 @@ def create_token_dict_from_features(image_features, sizes=None):
                 ((1 / 2 + torch.arange(s)) / s)
                 for s in sizes
             ],
-            indexing='ij',
+            indexing="ij",
         ),
         dim=-1,
     )
@@ -417,14 +480,15 @@ def create_token_dict_from_features(image_features, sizes=None):
 
 class TokenMergeClusterDPCKNN(nn.Module):
     """Token merging with dpc-knn. Agnostic of dimension of features (e.g., 1d, image, video).
-        but need to supply `self.forward` with properly constructed `token_dict`. """
+    but need to supply `self.forward` with properly constructed `token_dict`."""
 
-    def __init__(self, sample_ratios, ks, coord_weight, token_ordering):
+    def __init__(self, sample_ratios, ks, coord_weight, token_ordering, prune_ratios=None):
         super().__init__()
         self.sample_ratios = sample_ratios
         self.ks = ks
         self.coord_weight = coord_weight
         self.token_ordering = token_ordering
+        self.prune_ratios = prune_ratios if prune_ratios else [None]*len(sample_ratios)
 
         # not really used anywhere
         embed_dim = 1024
@@ -433,7 +497,7 @@ class TokenMergeClusterDPCKNN(nn.Module):
         self.ctms = nn.ModuleList()
         self.tc_blocks = nn.ModuleList()
 
-        for sample_ratio, k in zip(sample_ratios, ks):
+        for sample_ratio, k, prune_ratio in zip(sample_ratios, ks, self.prune_ratios):
             ctm = CTM(
                 sample_ratio=sample_ratio,
                 embed_dim=embed_dim,
@@ -441,15 +505,15 @@ class TokenMergeClusterDPCKNN(nn.Module):
                 coord_weight=coord_weight,
                 k=k,
                 token_ordering=token_ordering,
+                prune_ratio=prune_ratio,
             )
             block = TCBlock(dim=dim_out, num_heads=8)
             self.ctms.append(ctm)
             self.tc_blocks.append(block)
 
-        
     def forward(self, token_dict):
         """Returns [token_list, token_list0, ...,]
-                a list of state, e.g., cluster membership, merged features etc. initially and after each layer.
+        a list of state, e.g., cluster membership, merged features etc. initially and after each layer.
         """
         token_dict_list = [token_dict]
         for ctm, block in zip(self.ctms, self.tc_blocks):
@@ -466,47 +530,9 @@ class TokenMergeClusterDPCKNN(nn.Module):
                 "(",
                 str(self.sample_ratios).replace(" ", "") + ",",
                 str(self.ks).replace(" ", "") + ",",
-                str(self.coord_weight),
-                ")",
-            ]
-        )
-
-
-class UnitTokenMergeClusterDPCKNN(TokenMergeClusterDPCKNN):
-    """Token merging with dpc-knn. depends on the dimension of features (e.g., 1d, image, video).
-        Assumes that the features are of unit length, e.g., square image, video with same length as 
-        the number of patches in x direction.
-    """
-    def __init__(self, sample_ratios, ks, coord_weight, coord_dim, token_ordering):
-        super().__init__(sample_ratios, ks, coord_weight, token_ordering)
-        self.coord_dim = coord_dim
-
-    def forward(self, image_features):
-        """
-        `image_features` (B, N, C)
-            if `features` is 1d, then N is number of features
-            if `features` is 2d, then it represents a sqrt(N)xsqrt(N) image
-            if `features` is 3d, then it represents a cube with length of each side as N**(1/3)
-        """
-        # assume square image or cubic video
-        if self.coord_dim == 1:
-            sizes = (image_features.shape[1],)
-        elif self.coord_dim == 2:
-            sizes = (int(math.sqrt(image_features.shape[1])),)*2
-        elif self.coord_dim == 3:
-            sizes = (int(image_features.shape[1] ** (1 / 3)),)*3
-        token_dict = create_token_dict_from_features(image_features, sizes)
-        return super().forward(token_dict)
-
-    def __repr__(self):
-        return "".join(
-            [
-                "UnitTokenMergeClusterDPCKNN",
-                "(",
-                str(self.sample_ratios).replace(" ", "") + ",",
-                str(self.ks).replace(" ", "") + ",",
-                str(self.coord_weight),
-                str(self.coord_dim),
+                str(self.coord_weight) + ",",
+                str(self.token_ordering) + ",",
+                str(self.prune_ratios),
                 ")",
             ]
         )
@@ -522,16 +548,19 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
         ks,
         coord_weights,
         token_orderings,
+        prune_ratios_spatial,
+        prune_ratios_video,
     ):
         super().__init__()
         coord_weight_temporal, coord_weight_spatial, coord_weight_video = coord_weights
         token_ordering_temporal, token_ordering_spatial, token_ordering_video = token_orderings
+        prune_ratios_spatial = prune_ratios_spatial if prune_ratios_spatial else [None]*len(sample_ratios_spatial)
+        prune_ratios_video = prune_ratios_video if prune_ratios_video else [None]*len(sample_ratios_video)
 
-        self.token_merge_temporal = UnitTokenMergeClusterDPCKNN(
+        self.token_merge_temporal = TokenMergeClusterDPCKNN(
             sample_ratios=sample_ratios_temporal,
             ks=ks[:1],
             coord_weight=coord_weight_temporal,
-            coord_dim=1,
             token_ordering=token_ordering_temporal,
         )
         self.token_merge_image = TokenMergeClusterDPCKNN(
@@ -539,16 +568,27 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
             ks=ks,
             coord_weight=coord_weight_spatial,
             token_ordering=token_ordering_spatial,
+            prune_ratios=prune_ratios_spatial,
         )
         self.token_merge_video_list = torch.nn.ModuleList(
             [
-                TokenMergeClusterDPCKNN(sample_ratios=[sample_ratio], ks=[k], coord_weight=coord_weight_video, token_ordering=token_ordering_video)
-                for sample_ratio, k in zip(sample_ratios_video, ks)
+                TokenMergeClusterDPCKNN(
+                    sample_ratios=[sample_ratio],
+                    ks=[k],
+                    coord_weight=coord_weight_video,
+                    token_ordering=token_ordering_video,
+                    prune_ratios=[prune_ratio]
+                )
+                for sample_ratio, k, prune_ratio in zip(
+                        sample_ratios_video,
+                        ks,
+                        prune_ratios_video,
+                    )
             ]
         )
 
     def forward(self, image_features):
-        
+
         # `image_features`: (#frames, #patches, D)
         _, P, D = image_features.shape
         device = image_features.device
@@ -556,7 +596,9 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
         # token merging on each frame's global avg pool features
         # cls_features: (1, #frames, D)
         cls_features = torch.mean(image_features, dim=1, keepdim=False).unsqueeze(0).clone()
-        token_dict_temporal = self.token_merge_temporal(cls_features)[-1]
+        token_dict_temporal = create_token_dict_from_features(
+            cls_features, (cls_features.shape[1],))
+        token_dict_temporal = self.token_merge_temporal(token_dict_temporal)[-1]
 
         # [[event0_frame0, event0_frame1, ...], [event1_frame0, ...], ...]
         events = collections.defaultdict(list)
@@ -629,7 +671,6 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
                 token_dict_video = token_merge_video(token_dict)[-1]
                 token_dict_event_list.append(token_dict_video)
             token_dict_video_list.append(token_dict_event_list)
-
 
         video_features = []
         for token_dict_event_list in token_dict_video_list:

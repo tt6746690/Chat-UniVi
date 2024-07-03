@@ -44,6 +44,8 @@ model_config_v2 = {
     "sample_ratios_video": [64, 32, 16],
     "coord_weights": [0., 0., 0.],
     "token_orderings": ['raster', 'default', 'default'],
+    "prune_ratios_spatial": None,
+    "prune_ratios_video": None,
 }
 
 
@@ -54,5 +56,7 @@ model_config_v3 = {
     "sample_ratios_video": [64, 32, 16],
     "coord_weights": [0, 0],
     "token_orderings": ["default", "default"],
+    "prune_ratios_spatial": None,
+    "prune_ratios_video": None,
 }
 

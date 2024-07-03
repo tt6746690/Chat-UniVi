@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from .multimodal_encoder.builder import build_vision_tower
 from ChatUniVi.constants import *
-from .cluster import CTM, TCBlock, TokenMergeClusterDPCKNN, UnitTokenMergeClusterDPCKNN, VideoTokenMergeClusterDPCKNN, create_token_dict_from_features
+from .cluster import CTM, TCBlock, TokenMergeClusterDPCKNN, VideoTokenMergeClusterDPCKNN, create_token_dict_from_features
 from collections import OrderedDict
 import collections
 from .multimodal_projector.builder import build_vision_projector
@@ -107,6 +107,8 @@ class MetaModel:
             ks=ks,
             coord_weights=model_config['coord_weights'],
             token_orderings=model_config['token_orderings'],
+            prune_ratios_spatial=model_config.get('prune_ratios_spatial', None),
+            prune_ratios_video=model_config.get('prune_ratios_video', None),
         )
 
     def initialize_cluster_modules_v3(self, model_config):
@@ -121,12 +123,14 @@ class MetaModel:
             ks=ks[:len(sample_ratios_spatial)],
             coord_weight=coord_weight_spatial,
             token_ordering=token_ordering_spatial,
+            prune_ratios=model_config.get('prune_ratios_spatial', None),
         )
         self.token_merging_video = TokenMergeClusterDPCKNN(
             sample_ratios=sample_ratios_video,
             ks=ks[:len(sample_ratios_video)],
             coord_weight=coord_weight_video,
             token_ordering=token_ordering_video,
+            prune_ratios=model_config.get('prune_ratios_video', None),
         )
 
 

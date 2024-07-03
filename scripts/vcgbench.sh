@@ -3,6 +3,8 @@
 set -e
 set -x
 
+
+
 # Set up a trap to catch errors and exit all processes
 trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
 
@@ -20,12 +22,9 @@ IFS=',' read -ra GPULIST <<< "$gpu_list"
 CHUNKS=${#GPULIST[@]}
 
 
-if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
-      ! -f "$CKPT/eval/vcgbench/answers-temporal/merge.jsonl" || \
-      ! -f "$CKPT/eval/vcgbench/answers-consistency/merge.jsonl" ]]; then
-
+# generic
+if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" ]]; then
     for IDX in $(seq 0 $((CHUNKS-1))); do
-        # generic
         CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_video_general \
             --model-path $CKPT \
             --question-file $CHATUNIVI_REPO_DIR/ChatUniVi/eval/questions/video_qa/generic_qa.json \
@@ -35,7 +34,20 @@ if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
             --chunk-idx $IDX \
             --temperature 0.2 \
             --conv-mode $CONV_MODE &
-        # temporal
+    done
+    wait
+    output_file=$CKPT/eval/vcgbench/answers-generic/merge.jsonl
+    echo $output_file
+    > "$output_file"
+    for IDX in $(seq 0 $((CHUNKS-1))); do
+        cat $CKPT/eval/vcgbench/answers-generic/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+    done
+fi
+
+
+# temporal
+if [[ ! -f "$CKPT/eval/vcgbench/answers-temporal/merge.jsonl" ]]; then
+    for IDX in $(seq 0 $((CHUNKS-1))); do
         CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_video_general \
             --model-path $CKPT \
             --question-file $CHATUNIVI_REPO_DIR/ChatUniVi/eval/questions/video_qa/temporal_qa.json \
@@ -45,7 +57,20 @@ if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
             --chunk-idx $IDX \
             --temperature 0.2 \
             --conv-mode $CONV_MODE &
-        # consistency
+    done
+    wait
+    output_file=$CKPT/eval/vcgbench/answers-temporal/merge.jsonl
+    echo $output_file
+    > "$output_file"
+    for IDX in $(seq 0 $((CHUNKS-1))); do
+        cat $CKPT/eval/vcgbench/answers-temporal/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+    done
+fi
+
+
+# consistency
+if [[ ! -f "$CKPT/eval/vcgbench/answers-consistency/merge.jsonl" ]]; then
+    for IDX in $(seq 0 $((CHUNKS-1))); do
         CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_video_consistency \
             --model-path $CKPT \
             --question-file $CHATUNIVI_REPO_DIR/ChatUniVi/eval/questions/video_qa/consistency_qa.json \
@@ -56,35 +81,84 @@ if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
             --temperature 0.2 \
             --conv-mode $CONV_MODE &
     done
-
     wait
-
-    # generic
-    output_file=$CKPT/eval/vcgbench/answers-generic/merge.jsonl
-    echo $output_file
-    > "$output_file"
-    for IDX in $(seq 0 $((CHUNKS-1))); do
-        cat $CKPT/eval/vcgbench/answers-generic/${CHUNKS}_${IDX}.jsonl >> "$output_file"
-    done
-
-    # temporal
-    output_file=$CKPT/eval/vcgbench/answers-temporal/merge.jsonl
-    echo $output_file
-    > "$output_file"
-    for IDX in $(seq 0 $((CHUNKS-1))); do
-        cat $CKPT/eval/vcgbench/answers-temporal/${CHUNKS}_${IDX}.jsonl >> "$output_file"
-    done
-
-    # consistency
     output_file=$CKPT/eval/vcgbench/answers-consistency/merge.jsonl
     echo $output_file
     > "$output_file"
     for IDX in $(seq 0 $((CHUNKS-1))); do
         cat $CKPT/eval/vcgbench/answers-consistency/${CHUNKS}_${IDX}.jsonl >> "$output_file"
     done
-else
-    echo "$CKPT/eval/vcgbench/answers-{generic, temporal, consistency}/merge.jsonl exists!"
 fi
+
+
+
+# ## put 3 jobs on the same gpu.
+
+# if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
+#       ! -f "$CKPT/eval/vcgbench/answers-temporal/merge.jsonl" || \
+#       ! -f "$CKPT/eval/vcgbench/answers-consistency/merge.jsonl" ]]; then
+
+#     for IDX in $(seq 0 $((CHUNKS-1))); do
+#         # generic
+#         CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_video_general \
+#             --model-path $CKPT \
+#             --question-file $CHATUNIVI_REPO_DIR/ChatUniVi/eval/questions/video_qa/generic_qa.json \
+#             --video-folder $VIDEO_FOLDER \
+#             --answers-file $CKPT/eval/vcgbench/answers-generic/${CHUNKS}_${IDX}.jsonl \
+#             --num-chunks $CHUNKS \
+#             --chunk-idx $IDX \
+#             --temperature 0.2 \
+#             --conv-mode $CONV_MODE &
+#         # temporal
+#         CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_video_general \
+#             --model-path $CKPT \
+#             --question-file $CHATUNIVI_REPO_DIR/ChatUniVi/eval/questions/video_qa/temporal_qa.json \
+#             --video-folder $VIDEO_FOLDER \
+#             --answers-file $CKPT/eval/vcgbench/answers-temporal/${CHUNKS}_${IDX}.jsonl \
+#             --num-chunks $CHUNKS \
+#             --chunk-idx $IDX \
+#             --temperature 0.2 \
+#             --conv-mode $CONV_MODE &
+#         # consistency
+#         CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_video_consistency \
+#             --model-path $CKPT \
+#             --question-file $CHATUNIVI_REPO_DIR/ChatUniVi/eval/questions/video_qa/consistency_qa.json \
+#             --video-folder $VIDEO_FOLDER \
+#             --answers-file $CKPT/eval/vcgbench/answers-consistency/${CHUNKS}_${IDX}.jsonl \
+#             --num-chunks $CHUNKS \
+#             --chunk-idx $IDX \
+#             --temperature 0.2 \
+#             --conv-mode $CONV_MODE &
+#     done
+
+#     wait
+
+#     # generic
+#     output_file=$CKPT/eval/vcgbench/answers-generic/merge.jsonl
+#     echo $output_file
+#     > "$output_file"
+#     for IDX in $(seq 0 $((CHUNKS-1))); do
+#         cat $CKPT/eval/vcgbench/answers-generic/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+#     done
+
+#     # temporal
+#     output_file=$CKPT/eval/vcgbench/answers-temporal/merge.jsonl
+#     echo $output_file
+#     > "$output_file"
+#     for IDX in $(seq 0 $((CHUNKS-1))); do
+#         cat $CKPT/eval/vcgbench/answers-temporal/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+#     done
+
+#     # consistency
+#     output_file=$CKPT/eval/vcgbench/answers-consistency/merge.jsonl
+#     echo $output_file
+#     > "$output_file"
+#     for IDX in $(seq 0 $((CHUNKS-1))); do
+#         cat $CKPT/eval/vcgbench/answers-consistency/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+#     done
+# else
+#     echo "$CKPT/eval/vcgbench/answers-{generic, temporal, consistency}/merge.jsonl exists!"
+# fi
 
 
 

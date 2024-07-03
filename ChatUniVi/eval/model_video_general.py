@@ -84,6 +84,7 @@ def eval_model(args):
 
             # wpq: since `_get_rawvideo_dec` is modified, need to concat images before feeding into `.generate`
             images = torch.stack(video_frames).half().to('cuda')
+            print(images.shape, images.device)
             with torch.inference_mode():
                 output_ids = model.generate(
                     input_ids,
