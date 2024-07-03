@@ -370,6 +370,11 @@ class CTM(nn.Module):
                 prune_num = max(math.ceil(self.prune_ratio), 1)
             else:
                 prune_num = max(math.ceil(N * self.prune_ratio), 1)
+        # if event consists of 1 frame,  N=64, cluster_num=64, prune_num>0
+        # then would be trying to cluster (64+prune_num) given 64 data points. 
+        # in this case, just don't do any pruning.
+        if cluster_num+prune_num > N:
+            prune_num = 0
         
         k = min(3, max(cluster_num // 2, 1)) if self.k > cluster_num else self.k
 
@@ -386,12 +391,12 @@ class CTM(nn.Module):
         down_dict = merge_tokens(token_dict, idx_cluster, cluster_num+prune_num, token_weight)
 
         if prune_num != 0:
+            # note if prune clusters, will undermine `token_ordering="default"`
+            # in this case, `token_ordering="default"` is equivalent to `token_ordering="clustersize"`
             down_dict = order_tokens(down_dict, token_ordering="clustersize")
             down_dict = take_firstn_clusters(down_dict, n=cluster_num)
 
         down_dict = order_tokens(down_dict, self.token_ordering)
-
-        down_dict['idx_cluster'] = idx_cluster
 
         return down_dict, token_dict
 
