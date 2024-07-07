@@ -528,6 +528,111 @@ class TokenMergeClusterDPCKNN(nn.Module):
             token_dict_list.append(token_dict)
         return token_dict_list
 
+    def merge_image_tokens(self, image_features):
+        """merge image features of size (B, H*W, D) independently along batch dimension.
+            To be consistent with `merge_video_tokens`, assumes an image is
+                a video with t=0. therefore cluster mean/covariance is 3D.
+                - mean[0] = 0.5
+                - cov[0,:] and cov[:,0] are all zeros.
+        """
+        device = image_features.device
+        B, P, D = image_features.shape
+        H = W = int(math.sqrt(P))
+        sizes = (H, W)
+        # (B, H*W, D)
+        token_dict = create_token_dict_from_features(image_features, sizes)
+        token_dict_list = self(token_dict)[1:]
+     
+        # (1, H, W, 3)
+        coord_grid = torch.stack(
+            torch.meshgrid(
+                *[(1 / 2 + torch.arange(s, device=device)) for s in (1, H, W)], indexing="ij",
+            ), dim=-1,
+        )
+
+        image_features = []
+        cluster_means = []
+        cluster_covs = []
+        for level in range(len(token_dict_list)):
+            token_dict = token_dict_list[level]
+            idx_token = token_dict['idx_token'].reshape(B, H, W)
+            image_features.append(token_dict['x'])
+            means = []
+            covs = []
+            for b in range(B):
+                for group_id in idx_token[b].unique():
+                    # (cluster_size, 3)
+                    C = coord_grid[(idx_token[b] == group_id).reshape(1, H, W)]
+                    means.append(torch.mean(C, dim=0))
+                    covs.append(torch.cov(C.T, correction=1 if C.size(0)>1 else 0))
+            # (B, #clusters, 3)
+            means = torch.stack(means).reshape(B, token_dict['token_num'], 3)
+            # (B, #clusters, 3,32)
+            covs = torch.stack(covs).reshape(B, token_dict['token_num'], 3, 3)
+            cluster_means.append(means)
+            cluster_covs.append(covs)
+        # (B, 64+32+16, 1024)
+        image_features = torch.cat(image_features, dim=1)
+        # (B, 64+32+16, 3)
+        cluster_means = torch.cat(cluster_means, dim=1)
+        # (B, 64+32+16, 3, 3)
+        cluster_covs = torch.cat(cluster_covs, dim=1)
+
+        outputs = {
+            'image_features': image_features,
+            'token_dict_list': token_dict_list,
+            'cluster_means': cluster_means,
+            'cluster_covs': cluster_covs,
+        }
+        return outputs
+    
+
+    def merge_video_tokens(self, image_features):
+        device = image_features.device
+        T, P, D = image_features.shape
+        H = W = int(math.sqrt(P))
+        sizes = (T, H, W)
+        # (T, H, W, D) -> (1, T*H*W, D)
+        image_features = image_features.reshape(1, -1, D)
+        token_dict = create_token_dict_from_features(image_features, sizes)
+        token_dict_list = self(token_dict)[1:]
+
+        # (T, H, W, 3)
+        coord_grid = torch.stack(
+            torch.meshgrid(
+                *[(1 / 2 + torch.arange(s, device=device)) for s in (T, H, W)], indexing="ij",
+            ), dim=-1,
+        )
+
+        image_features = []
+        cluster_means = []
+        cluster_covs = []
+        for level in range(len(token_dict_list)):
+            token_dict = token_dict_list[level]
+            idx_token = token_dict['idx_token'].reshape(T, H, W)
+            image_features.append(token_dict['x'])
+            for group_id in idx_token.unique():
+                C = coord_grid[idx_token == group_id]
+                cluster_means.append(torch.mean(C, dim=0))
+                cluster_covs.append(
+                    torch.cov(C.T, correction=1 if C.size(0)>1 else 0)
+                )
+        # (1, (64+32+16), 1024)
+        image_features = torch.cat(image_features, dim=1)
+        # (1, (64+32+16), 3)
+        cluster_means = torch.stack(cluster_means).unsqueeze(0)
+        # (1, (64+32+16), 3, 3)
+        cluster_covs = torch.stack(cluster_covs).unsqueeze(0)
+
+        outputs = {
+            'image_features': image_features,
+            'token_dict_list': token_dict_list,
+            'cluster_means': cluster_means,
+            'cluster_covs': cluster_covs,
+        }
+        return outputs
+
+
     def __repr__(self):
         return "".join(
             [
@@ -592,10 +697,14 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
             ]
         )
 
-    def forward(self, image_features):
+    def merge_image_tokens(self, image_features):
+        return self.token_merge_image.merge_image_tokens(image_features)
+
+    def merge_video_tokens(self, image_features):
 
         # `image_features`: (#frames, #patches, D)
-        _, P, D = image_features.shape
+        T, P, D = image_features.shape
+        H = W = int(math.sqrt(P))
         device = image_features.device
 
         # token merging on each frame's global avg pool features
@@ -621,9 +730,7 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
         token_dict_image_list = self.token_merge_image(token_dict)[1:]
 
         # t-dimension spacing is same as xy-dimension spacing.
-        num_frames_total = image_features.shape[0]
-        side_len = int(math.sqrt(image_features.shape[1]))
-        coord_z = (1 / 2 + torch.arange(0, num_frames_total, 1, device=device)) / side_len
+        coord_z = (1 / 2 + torch.arange(0, T, 1, device=device)) / H
 
         ## iterate over events
         token_dict_video_list = []
@@ -677,17 +784,41 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
                 token_dict_event_list.append(token_dict_video)
             token_dict_video_list.append(token_dict_event_list)
 
+
+        # (T, H, W, 3)
+        coord_grid = torch.stack(
+            torch.meshgrid(
+                *[(1 / 2 + torch.arange(s, device=device)) for s in (T, H, W)], indexing="ij",
+            ), dim=-1,
+        )
         video_features = []
-        for token_dict_event_list in token_dict_video_list:
-            # (1, 64+32+16, 1024)
-            event_features = torch.cat([d["x"] for d in token_dict_event_list], dim=1)
-            video_features.append(event_features)
-        # (1, (64+32+16)*#frames, 1024)
+        cluster_means = []
+        cluster_covs = []
+        for event_id, event_frame_ids in enumerate(events):
+            num_frames = len(event_frame_ids)
+            for level in range(len(self.token_merge_video_list)):
+                token_dict = token_dict_video_list[event_id][level]
+                video_features.append(token_dict['x'])
+                idx_token = token_dict['idx_token'].reshape(num_frames, H, W)
+                for group_id in idx_token.unique():
+                    C = coord_grid[event_frame_ids][idx_token == group_id]
+                    cluster_means.append(torch.mean(C, dim=0))
+                    cluster_covs.append(
+                        torch.cov(C.T, correction=1 if C.size(0)>1 else 0)
+                    )
+
+        # (1, #frames*(64+32+16), 1024)
         video_features = torch.cat(video_features, dim=1)
+        # (1, #frames*(64+32+16), 3)
+        cluster_means = torch.stack(cluster_means).unsqueeze(0)
+        # (1, #frames*(64+32+16), 3, 3)
+        cluster_covs = torch.stack(cluster_covs).unsqueeze(0)
 
         outputs = {
             "events": events,
-            "video_features": video_features,
+            "image_features": video_features,
+            "cluster_means": cluster_means,
+            "cluster_covs": cluster_covs,
             "token_dict_temporal": token_dict_temporal,
             "token_dict_image_list": token_dict_image_list,
             "token_dict_video_list": token_dict_video_list,

@@ -46,6 +46,7 @@ model_config_v2 = {
     "token_orderings": ['raster', 'default', 'default'],
     "prune_ratios_spatial": None,
     "prune_ratios_video": None,
+    "pe_type": None,
 }
 
 
@@ -58,5 +59,6 @@ model_config_v3 = {
     "token_orderings": ["default", "default"],
     "prune_ratios_spatial": None,
     "prune_ratios_video": None,
+    "pe_type": None,
 }
 

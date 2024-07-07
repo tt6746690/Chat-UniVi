@@ -134,6 +134,34 @@ class MetaModel:
         )
 
 
+def position_encoding_multidim(P, D, ordering='interleave'):
+    """Given a set of points `P`, generate the corresponding position embedding of length `D`
+        Note each dimension in `P` uses `D/ndim` number of channels.
+            e.g., If ndim=3, D=4096, then use 4096/3~1365 channels to embed x coordinate.
+
+        `P`     (N1, ..., Nd, ndim)
+        Returns (N1, ..., Nd, D)
+    """
+    import numpy as np
+    prefix_dims = list(P.shape[:-1])
+    ndim = P.shape[-1]
+    device = P.device
+    step = 2*ndim
+    Dp = D*2 # multiply by 2 the pattern covers more channels.
+    div_term = torch.exp(torch.arange(0, D, step, device=device, dtype=P.dtype) * -(math.log(10_000.) / Dp))
+    L = []
+    for di in range(ndim):
+        x = P[...,[di]] * div_term
+        L += [ torch.sin(x), torch.cos(x) ]
+    if ordering == 'interleave':
+        E = torch.stack(L, dim=2)
+    elif ordering == 'concat':
+        E = torch.cat(L, dim=1)
+    # if D%ndim!=0, then need to truncate end.
+    E = E.reshape(*prefix_dims, -1)[...,:D]
+    return E
+
+
 
 
 class ChatUniViMetaForCausalLM(ABC):
@@ -158,6 +186,45 @@ class ChatUniViMetaForCausalLM(ABC):
         x = x + p[:, :x.shape[1], :].to(x.device).to(x.dtype)
         return x
 
+    def ape_sinusoidal(self, image_token_embeds, token_merging_outputs):
+        """
+            image_token_embeds
+                iamge: (B, #tokens, 4096)
+                    B=1 for video & arbitrary for image. this function works for both.
+        """
+        config = self.get_model().config
+        if hasattr(config, "config") and config.config.get('pe_type', None):
+            from rosemary import parse_kv_from_string
+            pe_type = config.config['pe_type']
+            kvs = parse_kv_from_string(pe_type)
+            if kvs[0] == 'apesinu':
+                if kvs['enc'] == 'mean':
+                    if 'cluster_means' not in token_merging_outputs: return image_token_embeds
+                    # (B, #tokens, 3) where e.g. #tokens=64+32=16
+                    P = token_merging_outputs['cluster_means']
+                elif kvs['enc'] == 'mean+diagcov':
+                    if 'cluster_means' not in token_merging_outputs or 'cluster_covs' not in token_merging_outputs: return image_token_embeds
+                    cluster_covs_diag = torch.stack([
+                        token_merging_outputs['cluster_covs'][:, :, 0, 0],
+                        token_merging_outputs['cluster_covs'][:, :, 1, 1],
+                        token_merging_outputs['cluster_covs'][:, :, 2, 2],
+                    ], dim=-1)
+                    # (B, #tokens, 6)
+                    P = torch.cat((
+                        token_merging_outputs['cluster_means'],
+                        cluster_covs_diag,
+                    ), dim=2)
+                
+                ordering = kvs.get('ord', 'interleave')
+                # image: (B, #tokens, 4096)
+                pe = position_encoding_multidim(P, image_token_embeds.shape[-1], ordering=ordering)
+                pe = pe.to(image_token_embeds.device).to(image_token_embeds.dtype)
+                image_token_embeds = image_token_embeds + pe
+            else:
+                raise ValueError(f"pe_type={pe_type} not implemented.")
+        
+        return image_token_embeds
+
 
     def project(self, image_features, input_type="image"):
         """
@@ -176,38 +243,35 @@ class ChatUniViMetaForCausalLM(ABC):
         method_name = f"project_{self.get_model().cluster_type}"
         if not getattr(self, method_name):
             raise ValueError(f"[ChatUniViMetaForCausalLM.project] {method_name} not supported.")
-    
-        image_features = getattr(self, method_name)(image_features, input_type=input_type)
+
+        if method_name == 'project_v1':
+            image_features = getattr(self, method_name)(image_features, input_type=input_type)
+        else:
+            token_merging_outputs = getattr(self, method_name)(image_features, input_type=input_type)
+            image_features = token_merging_outputs['image_features']
+
         image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
-        image_features = self.get_model().mm_projector(image_features)
-        return image_features
+        image_token_embeds = self.get_model().mm_projector(image_features)
+
+        # only applied if `pe_type` in model config.`
+        image_token_embeds = self.ape_sinusoidal(image_token_embeds, token_merging_outputs)
+        return image_token_embeds
 
 
     def project_v3(self, image_features, input_type="image"):
         if input_type == "image":
-            sizes = (int(math.sqrt(image_features.shape[1])),) * 2
-            token_dict = create_token_dict_from_features(image_features, sizes)
-            token_dict_list = self.get_model().token_merge_image(token_dict)[1:]
-            image_features = torch.cat([d['x'] for d in token_dict_list], dim=1)
+            outputs = self.get_model().token_merge_image.merge_image_tokens(image_features)
         else:
-            sizes = (image_features.shape[0],) + (int(image_features.shape[1] ** (1 / 2)),)*2
-            token_dict = create_token_dict_from_features(image_features.reshape(1, -1, image_features.shape[-1]), sizes)
-            token_dict_list = self.get_model().token_merging_video(token_dict)[1:]
-            image_features = torch.cat([d['x'] for d in token_dict_list], dim=1)
-        return image_features
+            outputs = self.get_model().token_merging_video.merge_video_tokens(image_features)
+        return outputs
 
 
     def project_v2(self, image_features, input_type="image"):
         if input_type == "image":
-            sizes = (int(math.sqrt(image_features.shape[1])),) * 2
-            token_dict = create_token_dict_from_features(image_features, sizes)
-            token_dict_image_list = self.get_model().token_merging_model.token_merge_image(token_dict)[1:]
-            # multiscale features: (B, 112, C)
-            image_features = torch.cat([d['x'] for d in token_dict_image_list], dim=1)
+            outputs = self.get_model().token_merging_model.merge_image_tokens(image_features)
         else:
-            outputs = self.get_model().token_merging_model(image_features)
-            image_features = torch.cat([torch.cat([d['x'] for d in l], dim=1) for l in outputs['token_dict_video_list']], dim=1)
-        return image_features
+            outputs = self.get_model().token_merging_model.merge_video_tokens(image_features)
+        return outputs
 
 
     def project_v1(self, image_features, input_type="image"):

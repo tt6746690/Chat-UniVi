@@ -80,6 +80,7 @@ class ModelArguments:
     token_ordering: Optional[str] = field(default=None)
     prune_ratios_spatial: Optional[List[int]] = field(default=None)
     prune_ratios_video: Optional[List[int]] = field(default=None)
+    pe_type: Optional[str] = field(default=None)
 
 
 
