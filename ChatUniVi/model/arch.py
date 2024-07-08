@@ -134,7 +134,7 @@ class MetaModel:
         )
 
 
-def position_encoding_multidim(P, D, ordering='interleave'):
+def position_encoding_multidim(P, D, div_base=10_000., ordering='interleave'):
     """Given a set of points `P`, generate the corresponding position embedding of length `D`
         Note each dimension in `P` uses `D/ndim` number of channels.
             e.g., If ndim=3, D=4096, then use 4096/3~1365 channels to embed x coordinate.
@@ -146,8 +146,7 @@ def position_encoding_multidim(P, D, ordering='interleave'):
     ndim = P.shape[-1]
     device = P.device
     step = 2*ndim
-    Dp = D*2 # multiply by 2 the pattern covers more channels.
-    div_term = torch.exp(torch.arange(0, D, step, device=device, dtype=P.dtype) * -(math.log(10_000.) / Dp))
+    div_term = torch.exp(torch.arange(0, D, step, device=device, dtype=P.dtype) * -(math.log(div_base) / D))
     L = []
     for di in range(ndim):
         x = P[...,[di]] * div_term
@@ -190,6 +189,9 @@ class ChatUniViMetaForCausalLM(ABC):
                 image: (B, #tokens, 4096)
                     B=1 for video & arbitrary for image. this function works for both.
         """
+        B, N, D = image_token_embeds.shape
+        device = image_token_embeds.device
+
         config = self.get_model().config
         if hasattr(config, "config") and config.config.get('pe_type', None):
             from rosemary import parse_kv_from_string
@@ -213,7 +215,7 @@ class ChatUniViMetaForCausalLM(ABC):
                         cluster_covs_diag,
                     ), dim=2)
                 elif kvs['enc'] == 'pos1d':
-                    P = torch.arange(P.shape[1], device=P.device, dtype=P.dtype).reshape(1, -1, 1).repeat(P.shape[0], 1, 1)
+                    P = torch.arange(N, device=device, dtype=image_token_embeds.dtype).reshape(1, -1, 1).repeat(B, 1, 1)
                 else:
                     raise ValueError(f"[ape_sinusoidal] token_ordering={token_ordering} not implemented.")
 
@@ -225,15 +227,15 @@ class ChatUniViMetaForCausalLM(ABC):
                 ## re-order tokens before adding position encoding.
                 token_ordering = kvs.get('tokord', None)
                 if token_ordering is not None:
-                    B = P.shape[0]
+                    ndim = P.shape[-1]
                     # sort_score: (B, N)
                     if token_ordering == "random":
                         sort_score = torch.rand_like(P[...,0])
                     elif token_ordering == "raster":
+                        # import pdb; pdb.set_trace()
                         # maps multi-dimensional coordinate [z,y,x] -> z*(64*24)+10*y+x for sorting.
                         # (3,)
-                        ndim = P.shape[-1]
-                        P_max = torch.stack([torch.max(P[...,i], dim=1).values + 1 for i in range(ndim)]).squeeze() # .reshape(1, 1, ndim)
+                        P_max = torch.stack([torch.max(P[...,i]) + 1 for i in range(ndim)]).squeeze()
                         # -> (16*16, 16, 1) 
                         P_max_cumprod_rev = torch.cat((
                             torch.cumprod(P_max[1:].flip(dims=[0]), dim=0).flip(dims=[0]),
@@ -241,7 +243,7 @@ class ChatUniViMetaForCausalLM(ABC):
                         ))
                         # (B, N)
                         sort_score = torch.stack(
-                            [P_max_cumprod_rev[di] * P[..., di] for di in range(P.shape[-1])], dim=-1
+                            [P_max_cumprod_rev[di] * P[..., di] for di in range(ndim)], dim=-1
                         ).sum(dim=-1)
                     else:
                         raise ValueError(f"[ape_sinusoidal] token_ordering={token_ordering} not implemented.")
@@ -249,7 +251,7 @@ class ChatUniViMetaForCausalLM(ABC):
                     inds = torch.argsort(sort_score, dim=-1, descending=False)
                     # (B, N, 3): re-ordered `P`
                     P = torch.stack([
-                        torch.take_along_dim(P[b], inds[b, :, None].repeat(1, P.shape[-1]), dim=0) for b in range(B)
+                        torch.take_along_dim(P[b], inds[b, :, None].repeat(1, ndim), dim=0) for b in range(B)
                     ]).reshape_as(P)
                     # (B, N, D)
                     image_token_embeds = torch.stack([
@@ -259,8 +261,9 @@ class ChatUniViMetaForCausalLM(ABC):
 
                 ## add position encoding
                 ordering = kvs.get('ord', 'interleave')
+                div_base = float(kvs.get('divbase', 10_000.))
                 # image: (B, #tokens, 4096)
-                pe = position_encoding_multidim(P, image_token_embeds.shape[-1], ordering=ordering)
+                pe = position_encoding_multidim(P, image_token_embeds.shape[-1], div_base=div_base, ordering=ordering)
                 pe = pe.to(image_token_embeds.device).to(image_token_embeds.dtype)
                 image_token_embeds = image_token_embeds + pe
             else:

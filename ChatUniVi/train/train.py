@@ -822,6 +822,7 @@ class LazySupervisedDataset(Dataset):
     def _get_item(self, i):
 
         sources = self.list_data_dict[i]
+
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
