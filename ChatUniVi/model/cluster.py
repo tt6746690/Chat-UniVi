@@ -333,6 +333,45 @@ def take_firstn_clusters(token_dict, n=None):
     return out_dict
 
 
+def create_token_dict_from_features(image_features, sizes=None):
+    """Create `token_dict` as input to clustering layers.
+    If `sizes` is None, then `image_features` assumed to be 1d signal.
+    """
+
+    B, N, D = image_features.shape
+    coord_dim = len(sizes)
+    # (N, d)
+    coord = torch.stack(
+        torch.meshgrid(
+            *[
+                # coordinate normalized to [0,1]
+                ((1 / 2 + torch.arange(s)) / s)
+                for s in sizes
+            ],
+            indexing="ij",
+        ),
+        dim=-1,
+    )
+
+    # (B, N, d)
+    coord = coord.reshape(N, coord_dim).repeat(B, 1, 1).to(image_features.device)
+    # (B, N)
+    idx_token = torch.arange(N)[None, :].repeat(B, 1)
+    # (B, N, 1)
+    agg_weight = image_features.new_ones(B, N, 1)
+
+    token_dict = {
+        "x": image_features,
+        "token_num": N,
+        "idx_token": idx_token,
+        "agg_weight": agg_weight,
+        "mask": None,
+        "coord": coord,
+    }
+
+    return token_dict
+
+
 
 class CTM(nn.Module):
     def __init__(self, sample_ratio, embed_dim, dim_out, k=5, coord_weight=0, token_ordering="default", prune_ratio=None):
@@ -443,44 +482,6 @@ class TCBlock(nn.Module):
             q_dict, kv_dict = inputs, None
         return q_dict
 
-
-def create_token_dict_from_features(image_features, sizes=None):
-    """Create `token_dict` as input to clustering layers.
-    If `sizes` is None, then `image_features` assumed to be 1d signal.
-    """
-
-    B, N, D = image_features.shape
-    coord_dim = len(sizes)
-    # (N, d)
-    coord = torch.stack(
-        torch.meshgrid(
-            *[
-                # coordinate normalized to [0,1]
-                ((1 / 2 + torch.arange(s)) / s)
-                for s in sizes
-            ],
-            indexing="ij",
-        ),
-        dim=-1,
-    )
-
-    # (B, N, d)
-    coord = coord.reshape(N, coord_dim).repeat(B, 1, 1).to(image_features.device)
-    # (B, N)
-    idx_token = torch.arange(N)[None, :].repeat(B, 1)
-    # (B, N, 1)
-    agg_weight = image_features.new_ones(B, N, 1)
-
-    token_dict = {
-        "x": image_features,
-        "token_num": N,
-        "idx_token": idx_token,
-        "agg_weight": agg_weight,
-        "mask": None,
-        "coord": coord,
-    }
-
-    return token_dict
 
 
 class TokenMergeClusterDPCKNN(nn.Module):
