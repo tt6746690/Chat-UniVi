@@ -55,11 +55,10 @@ def forward(
     # =L e.g., 323
     kv_seq_len = key_states.shape[-2]
     assert past_key_value is None, "past_key_value is not supported"
-    # wpq: if position_ids not consecutive, then take max of position_ids
-    kv_seq_len = max(position_ids.max().item()+1, kv_seq_len)
 
     # (1, 1, L, head_dim)
-    cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+    # wpq: if position_ids not consecutive, then take max of position_ids
+    cos, sin = self.rotary_emb(value_states, seq_len=max(position_ids.max().item()+1, kv_seq_len))
     # position_ids: (1, L) e.g., (1, 323) simply [[0, 1, 2, ..., 322]]
     query_states, key_states = apply_rotary_pos_emb(
         query_states, key_states, cos, sin, position_ids

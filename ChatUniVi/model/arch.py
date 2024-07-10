@@ -615,6 +615,7 @@ class ChatUniViMetaForCausalLM(ABC):
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, attention_mask, past_key_values, labels, images
     ):
+
         # images: 
         
         vision_tower = self.get_vision_tower()
@@ -699,21 +700,13 @@ class ChatUniViMetaForCausalLM(ABC):
                         cur_image_idx += 1
 
                     # cur_image_features: [(576, 1024), ..., (576, 1024)]. features for each frame in the video.
-
-                    if len(i) > 2:
-                        cur_image_features = torch.stack(cur_image_features, dim=0)
-                        # cur_image_features: (#frames, 576, 1024)
-                        projection_outputs = self.project(cur_image_features, input_type="video")
-                        cur_image_features = projection_outputs["image_token_embeds"]
-                        # cur_image_features: (1, 64+32+16, 1024)
-                        t, l, n = cur_image_features.size()
-                        cur_image_features = cur_image_features.contiguous().view(t * l, n)
-                    else:
-                        cur_image_features = torch.stack(cur_image_features, dim=0)
-                        projection_outputs = self.project(cur_image_features, input_type="image")
-                        cur_image_features = projection_outputs["image_token_embeds"]
-                        t, l, n = cur_image_features.size()
-                        cur_image_features = cur_image_features.contiguous().view(t * l, n)
+                    cur_image_features = torch.stack(cur_image_features, dim=0)
+                    # cur_image_features: (#frames, 576, 1024)
+                    projection_outputs = self.project(cur_image_features, input_type="video")
+                    cur_image_features = projection_outputs["image_token_embeds"]
+                    # cur_image_features: (1, 64+32+16, 1024)
+                    t, l, n = cur_image_features.size()
+                    cur_image_features = cur_image_features.contiguous().view(t * l, n)
 
                     cur_position_ids = projection_outputs['position_ids'].squeeze(0)
                     cur_image_token_embeds_max_positions = projection_outputs['max_positions']
@@ -813,7 +806,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 if labels is not None:
                     cur_new_labels.append(cur_labels)
                 cur_new_position_ids.append(torch.arange(cur_position_ids_start, cur_position_ids_start + cur_input_ids.shape[0], device=input_ids.device, dtype=torch.long))
-            
+
             cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
             # (seq_len, D)
             cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
@@ -824,6 +817,23 @@ class ChatUniViMetaForCausalLM(ABC):
             # (seq_len,)
             cur_new_position_ids = torch.cat(cur_new_position_ids, dim=0)
             new_position_ids.append(cur_new_position_ids)
+
+            #     print(e)
+            #     print({
+            #         'input_ids': input_ids,
+            #         'labels': labels,
+            #     })
+            #     print({
+            #         'input_ids': input_ids.shape,
+            #         'images': images.shape,
+            #         'cur_new_input_embeds': [x.shape for x in cur_new_input_embeds],
+            #         'cur_new_labels': [x.shape for x in cur_new_labels],
+            #         'cur_new_position_ids': [x.shape for x in cur_new_position_ids],
+            #     })
+
+
+        
+            
 
         # does padding to longest sequence.
         # does not take into account of pad left/right. just implements pad right.
@@ -874,7 +884,18 @@ class ChatUniViMetaForCausalLM(ABC):
                     cur_new_attention_mask = torch.cat((new_attn_mask_pad_left, cur_attention_mask, new_attn_mask_pad_right), dim=0)
                     new_attention_mask.append(cur_new_attention_mask)
                 attention_mask = torch.stack(new_attention_mask, dim=0)
-                assert attention_mask.shape == new_labels.shape
+
+                if attention_mask.shape != new_labels.shape:
+                    print('[prepare_inputs_labels_for_multimodal] attention_mask.shape != new_labels.shape or {attention_mask.shape} != {new_labels.shape}. infer attention_mask from input_ids')
+                    print('input_ids: ', input_ids)
+                    # basically attend to all of (input, response). specifically, assume pad_id=0, therefore just find input_id that is not padded and assign True to corresponding location in attention_mask. 
+                    new_attention_mask = []
+                    for cur_input_ids, cur_attention_mask, cur_new_labels, cur_new_labels_align in zip(input_ids, attention_mask, _new_labels, new_labels):
+                        new_attn_mask_pad_left = torch.full((cur_new_labels.shape[0] - labels.shape[1],), True, dtype=attention_mask.dtype, device=attention_mask.device)
+                        new_attn_mask_pad_right = torch.full((cur_new_labels_align.shape[0] - cur_new_labels.shape[0],), False, dtype=attention_mask.dtype, device=attention_mask.device)
+                        cur_new_attention_mask = torch.cat((new_attn_mask_pad_left, (cur_input_ids!=0), new_attn_mask_pad_right), dim=0)
+                        new_attention_mask.append(cur_new_attention_mask)
+                    attention_mask = torch.stack(new_attention_mask, dim=0)
 
         else:
             new_input_embeds = torch.stack(new_input_embeds, dim=0)
@@ -885,10 +906,11 @@ class ChatUniViMetaForCausalLM(ABC):
                 new_position_ids = torch.stack(new_position_ids, dim=0)
 
             if attention_mask is not None:
-                new_attn_mask_pad_left = torch.full((attention_mask.shape[0], new_input_embeds.shape[1] - input_ids.shape[1]), True, dtype=attention_mask.dtype, device=attention_mask.device)
+                new_attn_mask_pad_left = torch.full((attention_mask.shape[0], max(new_input_embeds.shape[1] - attention_mask.shape[1], 0)), True, dtype=attention_mask.dtype, device=attention_mask.device)
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
-                assert attention_mask.shape == new_input_embeds.shape[:2]
-        
+                assert(attention_mask.shape == new_input_embeds.shape[:2])
+
+
         return None, attention_mask, past_key_values, new_input_embeds, new_labels, new_position_ids
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
