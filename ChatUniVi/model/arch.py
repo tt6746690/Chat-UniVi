@@ -160,6 +160,28 @@ def position_encoding_multidim(P, D, div_base=10_000., ordering='interleave'):
     return E
 
 
+def ravel_multi_index(coords, shape):
+    r"""Converts a tensor of coordinate vectors into a tensor of flat indices.
+
+    This is a `torch` implementation of `numpy.ravel_multi_index`.
+
+    Reference: https://github.com/pytorch/pytorch/issues/35674
+
+    Args:
+        coords: A tensor of coordinate vectors, (*, D).
+        shape: The source shape.
+
+    Returns:
+        The raveled indices, (*,).
+    """
+
+    shape = coords.new_tensor((*shape, 1))
+    coefs = shape[1:].flipud().cumprod(dim=0).flipud()
+
+    return (coords * coefs).sum(dim=-1)
+
+
+
 
 class ChatUniViMetaForCausalLM(ABC):
     @abstractmethod
@@ -173,103 +195,181 @@ class ChatUniViMetaForCausalLM(ABC):
         image_features = self.get_model().get_vision_tower()(images, select_feature="patch")
         return image_features
 
-    def positional_encoding(self, x, num_features=1024, max_len=64):
-        p = torch.zeros((1, max_len, num_features))
-        _x = torch.arange(max_len, dtype=torch.float32).reshape(-1, 1) / torch.pow(10000,
-                                                                            torch.arange(0, num_features, 2, dtype=torch.float32) / num_features)
+    # def positional_encoding(self, x, num_features=1024, max_len=64):
+    #     p = torch.zeros((1, max_len, num_features))
+    #     _x = torch.arange(max_len, dtype=torch.float32).reshape(-1, 1) / torch.pow(10000,
+    #                                                                         torch.arange(0, num_features, 2, dtype=torch.float32) / num_features)
 
-        p[:, :, 0::2] = torch.sin(_x)
-        p[:, :, 1::2] = torch.cos(_x)
-        x = x + p[:, :x.shape[1], :].to(x.device).to(x.dtype)
-        return x
+    #     p[:, :, 0::2] = torch.sin(_x)
+    #     p[:, :, 1::2] = torch.cos(_x)
+    #     x = x + p[:, :x.shape[1], :].to(x.device).to(x.dtype)
+    #     return x
 
-    def ape_sinusoidal(self, image_token_embeds, token_merging_outputs):
+    def positional_encoding(self, image_token_embeds, token_merging_outputs, input_type):
         """
             image_token_embeds
                 image: (B, #tokens, 4096)
                     B=1 for video & arbitrary for image. this function works for both.
         """
-        B, N, D = image_token_embeds.shape
+        from rosemary import parse_kv_from_string
+
+        B, N, _ = image_token_embeds.shape
         device = image_token_embeds.device
 
+        outputs = {
+            "image_token_embeds": image_token_embeds,
+            "position_ids": torch.arange(N, device=device, dtype=torch.long).reshape(1, N).repeat(B, 1),
+            "max_positions": torch.tensor(N, device=device),
+        }
+
         config = self.get_model().config
-        if hasattr(config, "config") and config.config.get('pe_type', None):
-            from rosemary import parse_kv_from_string
-            pe_type = config.config['pe_type']
-            kvs = parse_kv_from_string(pe_type)
-            if kvs[0] == 'apesinu':
-                if kvs['enc'] == 'mean':
-                    if 'cluster_means' not in token_merging_outputs: return image_token_embeds
-                    # (B, #tokens, 3) where e.g. #tokens=64+32=16
-                    P = token_merging_outputs['cluster_means']
-                elif kvs['enc'] == 'mean+diagcov':
-                    if 'cluster_means' not in token_merging_outputs or 'cluster_covs' not in token_merging_outputs: return image_token_embeds
-                    cluster_covs_diag = torch.stack([
-                        token_merging_outputs['cluster_covs'][:, :, 0, 0],
-                        token_merging_outputs['cluster_covs'][:, :, 1, 1],
-                        token_merging_outputs['cluster_covs'][:, :, 2, 2],
-                    ], dim=-1)
-                    # (B, #tokens, 6)
-                    P = torch.cat((
-                        token_merging_outputs['cluster_means'],
-                        cluster_covs_diag,
-                    ), dim=2)
-                elif kvs['enc'] == 'pos1d':
-                    P = torch.arange(N, device=device, dtype=image_token_embeds.dtype).reshape(1, -1, 1).repeat(B, 1, 1)
-                else:
-                    raise ValueError(f"[ape_sinusoidal] token_ordering={token_ordering} not implemented.")
+        if not hasattr(config, "config") or config.config.get('pe_type', None) is None:
+            return outputs
 
-                ## whether to discretize the position or not.
-                discrete_positions = bool(kvs.get('discrete', 0))
-                if discrete_positions is True:
-                    P = torch.floor(P)
+        pe_type = config.config['pe_type']
+        kvs = parse_kv_from_string(pe_type)
 
-                ## re-order tokens before adding position encoding.
-                token_ordering = kvs.get('tokord', None)
-                if token_ordering is not None:
-                    ndim = P.shape[-1]
-                    # sort_score: (B, N)
-                    if token_ordering == "random":
-                        sort_score = torch.rand_like(P[...,0])
-                    elif token_ordering == "raster":
-                        # import pdb; pdb.set_trace()
-                        # maps multi-dimensional coordinate [z,y,x] -> z*(64*24)+10*y+x for sorting.
-                        # (3,)
-                        P_max = torch.stack([torch.max(P[...,i]) + 1 for i in range(ndim)]).squeeze()
-                        # -> (16*16, 16, 1) 
-                        P_max_cumprod_rev = torch.cat((
-                            torch.cumprod(P_max[1:].flip(dims=[0]), dim=0).flip(dims=[0]),
-                            torch.tensor([1.], device=P_max.device, dtype=P_max.dtype)
-                        ))
-                        # (B, N)
-                        sort_score = torch.stack(
-                            [P_max_cumprod_rev[di] * P[..., di] for di in range(ndim)], dim=-1
-                        ).sum(dim=-1)
-                    else:
-                        raise ValueError(f"[ape_sinusoidal] token_ordering={token_ordering} not implemented.")
-                    # [new_cluster_id: old_cluster_id]
-                    inds = torch.argsort(sort_score, dim=-1, descending=False)
-                    # (B, N, 3): re-ordered `P`
-                    P = torch.stack([
-                        torch.take_along_dim(P[b], inds[b, :, None].repeat(1, ndim), dim=0) for b in range(B)
-                    ]).reshape_as(P)
-                    # (B, N, D)
-                    image_token_embeds = torch.stack([
-                        torch.take_along_dim(image_token_embeds[b], inds[b, :, None].repeat(1, image_token_embeds.shape[-1]), dim=0) for b in range(B)
-                    ]).reshape_as(image_token_embeds)
-                
-
-                ## add position encoding
-                ordering = kvs.get('ord', 'interleave')
-                div_base = float(kvs.get('divbase', 10_000.))
-                # image: (B, #tokens, 4096)
-                pe = position_encoding_multidim(P, image_token_embeds.shape[-1], div_base=div_base, ordering=ordering)
-                pe = pe.to(image_token_embeds.device).to(image_token_embeds.dtype)
-                image_token_embeds = image_token_embeds + pe
+        if kvs[0] == 'apesinu':
+            if kvs['enc'] == 'mean':
+                if 'cluster_means' not in token_merging_outputs: return outputs
+                # (B, N, 3) where e.g. N=64+32=16
+                P = token_merging_outputs['cluster_means']
+            elif kvs['enc'] == 'mean+diagcov':
+                if 'cluster_means' not in token_merging_outputs or 'cluster_covs' not in token_merging_outputs: return outputs
+                cluster_covs_diag = torch.stack([
+                    token_merging_outputs['cluster_covs'][:, :, 0, 0],
+                    token_merging_outputs['cluster_covs'][:, :, 1, 1],
+                    token_merging_outputs['cluster_covs'][:, :, 2, 2],
+                ], dim=-1)
+                # (B, N, 6)
+                P = torch.cat((
+                    token_merging_outputs['cluster_means'],
+                    cluster_covs_diag,
+                ), dim=2)
+            elif kvs['enc'] == 'pos1d':
+                P = torch.arange(N, device=device, dtype=image_token_embeds.dtype).reshape(1, -1, 1).repeat(B, 1, 1)
             else:
-                raise ValueError(f"pe_type={pe_type} not implemented.")
+                raise ValueError(f"[positional_encoding] enc={kvs['enc']} not implemented.")
+
+            ## whether to discretize the position or not.
+            discrete_positions = bool(kvs.get('discrete', 0))
+            if discrete_positions is True:
+                P = torch.floor(P)
+
+            ## re-order tokens before adding position encoding.
+            token_ordering = kvs.get('tokord', None)
+            if token_ordering is not None:
+                ndim = P.shape[-1]
+                # sort_score: (B, N)
+                if token_ordering == "random":
+                    sort_score = torch.rand_like(P[...,0])
+                elif token_ordering == "raster":
+                    # maps multi-dimensional coordinate [z,y,x] -> z*(64*24)+10*y+x for sorting.
+                    # (3,)
+                    P_max = torch.stack([torch.max(P[...,i]) + 1 for i in range(ndim)]).squeeze()
+                    # -> (16*16, 16, 1) 
+                    P_max_cumprod_rev = torch.cat((
+                        torch.cumprod(P_max[1:].flip(dims=[0]), dim=0).flip(dims=[0]),
+                        torch.tensor([1.], device=P_max.device, dtype=P_max.dtype)
+                    ))
+                    # (B, N)
+                    sort_score = torch.stack(
+                        [P_max_cumprod_rev[di] * P[..., di] for di in range(ndim)], dim=-1
+                    ).sum(dim=-1)
+                else:
+                    raise ValueError(f"[positional_encoding] token_ordering={token_ordering} not implemented.")
+                # [new_cluster_id: old_cluster_id]
+                inds = torch.argsort(sort_score, dim=-1, descending=False)
+                # (B, N, 3): re-ordered `P`
+                P = torch.stack([
+                    torch.take_along_dim(P[b], inds[b, :, None].repeat(1, ndim), dim=0) for b in range(B)
+                ]).reshape_as(P)
+                # (B, \#, D)
+                image_token_embeds = torch.stack([
+                    torch.take_along_dim(image_token_embeds[b], inds[b, :, None].repeat(1, image_token_embeds.shape[-1]), dim=0) for b in range(B)
+                ]).reshape_as(image_token_embeds)
+            
+            ## add position encoding
+            ordering = kvs.get('ord', 'interleave')
+            div_base = float(kvs.get('divbase', 10_000.))
+            # image: (B, N, 4096)
+            pe = position_encoding_multidim(P, image_token_embeds.shape[-1], div_base=div_base, ordering=ordering)
+            pe = pe.to(image_token_embeds.device).to(image_token_embeds.dtype)
+            image_token_embeds = image_token_embeds + pe
+            
+            outputs.update({
+                "image_token_embeds": image_token_embeds,
+            })
+        elif kvs[0] == 'rope1d':
+            
+            T = MAX_IMAGE_LENGTH
+            H = W = int(self.get_model().get_vision_tower().config.image_size / self.get_model().get_vision_tower().config.patch_size)
+
+            if kvs['enc'] == 'pos3dravel':
+                if 'cluster_means' not in token_merging_outputs: return outputs
+                # (B, N, 3)
+                P = token_merging_outputs['cluster_means']
+                P = torch.floor(P).to(torch.long) # discretize
+                # (B, N)
+                P = ravel_multi_index(P, (1, H, W)) # note T length does not matter when ravel multi-index
+            elif kvs['enc'] == 'pos1d':
+                # (B, N)
+                P = torch.arange(N, device=device, dtype=torch.float32).reshape(1, N).repeat(B, 1)
+            else:
+                raise ValueError(f"[positional_encoding] enc={kvs['enc']} not implemented.")
+
+            # max(P) can be at most 64*24*24=36,864 tokens for video. Normalize to kvs['vidmaxpos']
+
+            scale_position_ids = bool(kvs.get('scalepos', 0))
+            if scale_position_ids:
+                if input_type == 'image':
+                    P = P / (H*W / kvs['imgmaxpos'])
+                elif input_type == 'video':
+                    P = P / (T*H*W / kvs['vidmaxpos'])
+                else:
+                    raise ValueError(f'[positional_encoding] invalid input_type={input_type}')
+            # (B, N)
+            position_ids = torch.round(P).to(torch.long)
+
+            ## re-order tokens by position
+            token_ordering = kvs.get('tokord', None)
+            if token_ordering is not None and token_ordering != 'default':
+                # sort_score: (B, N)
+                if token_ordering == "random":
+                    sort_score = torch.rand_like(P)
+                elif token_ordering == "raster":
+                    sort_score = P
+                else:
+                    raise ValueError(f"[positional_encoding] token_ordering={token_ordering} not implemented.")
+                inds = torch.argsort(sort_score, dim=-1, descending=False)
+                # (B, N)
+                position_ids = torch.take_along_dim(position_ids, inds, dim=-1)
+                # (B, N, D)
+                image_token_embeds = torch.stack([
+                    torch.take_along_dim(image_token_embeds[b], inds[b, :, None].repeat(1, image_token_embeds.shape[-1]), dim=0) for b in range(B)])
+
+            # decides what next position_id should be after image tokens
+            max_positions_type = kvs.get('maxpostype', None)
+            if  max_positions_type is not None:
+                if max_positions_type == 'add1': 
+                    # if position_ids=[0,1,2], then position_ids_max=3
+                    # corresponds to default case, if position_ids consecutive, then it's simply #tokens
+                    max_positions = position_ids.max()+1
+                elif max_positions_type == 'max':
+                    # allocate `kvs['videomaxpos']` position_ids to represent video
+                    max_positions = torch.tensor(kvs['vidmaxpos'] if input_type == 'video' else kvs['imgmaxpos'], device=device)
+                else:
+                    raise ValueError(f'[positional_encoding] invalid max_positions_type={max_positions_type}')
+
+            outputs.update({
+                "image_token_embeds": image_token_embeds,
+                "position_ids": position_ids,
+                "max_positions": max_positions,
+            })
+        else:
+            raise ValueError(f"[positional_encoding] pe_type={pe_type} not implemented.")
         
-        return image_token_embeds
+        return outputs
 
 
     def project(self, image_features, input_type="image"):
@@ -292,6 +392,7 @@ class ChatUniViMetaForCausalLM(ABC):
 
         if method_name == 'project_v1':
             image_features = getattr(self, method_name)(image_features, input_type=input_type)
+            token_merging_outputs = None
         else:
             token_merging_outputs = getattr(self, method_name)(image_features, input_type=input_type)
             image_features = token_merging_outputs['image_features']
@@ -300,8 +401,14 @@ class ChatUniViMetaForCausalLM(ABC):
         image_token_embeds = self.get_model().mm_projector(image_features)
 
         # only applied if `pe_type` in model config.`
-        image_token_embeds = self.ape_sinusoidal(image_token_embeds, token_merging_outputs)
-        return image_token_embeds
+        positional_encoding_outputs = self.positional_encoding(image_token_embeds, token_merging_outputs, input_type)
+
+        projection_outputs = {
+            "image_token_embeds": positional_encoding_outputs["image_token_embeds"],
+            "position_ids": positional_encoding_outputs["position_ids"],
+            "max_positions": positional_encoding_outputs["max_positions"],
+        }
+        return projection_outputs
 
 
     def project_v3(self, image_features, input_type="image"):
@@ -514,7 +621,7 @@ class ChatUniViMetaForCausalLM(ABC):
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
                 attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1), dtype=attention_mask.dtype, device=attention_mask.device)
-            return input_ids, attention_mask, past_key_values, None, labels
+            return input_ids, attention_mask, past_key_values, None, labels, None
 
         if type(images) is list or images.ndim == 5: # might is called during generation i think.
             concat_images = torch.cat([image for image in images], dim=0)
@@ -536,6 +643,7 @@ class ChatUniViMetaForCausalLM(ABC):
         #  'image_features.shape': torch.Size([38, 576, 1024])}
 
 
+        new_position_ids = []
         new_input_embeds = []
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
@@ -551,10 +659,13 @@ class ChatUniViMetaForCausalLM(ABC):
                 cur_image_idx += 1
                 continue
 
+            cur_position_ids_start = 0
+
             # image_token_indices: tensor([35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48], device='cuda:0')
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
 
             cur_new_input_embeds = []
+            cur_new_position_ids = [] # wpq: position_id for current example in the batch
             if labels is not None:
                 cur_labels = labels[batch_idx]
                 cur_new_labels = []
@@ -575,6 +686,8 @@ class ChatUniViMetaForCausalLM(ABC):
                         temp.append([cur])
                     pre = cur
 
+                if len(temp) != 1:
+                    raise ValueError(f'should contain 1 consecutive <image> tags but got {len(temp)}: {temp}')
 
                 for i in temp:
                     image_token_start = image_token_indices[0] # tensor(35, device='cuda:0')
@@ -589,17 +702,21 @@ class ChatUniViMetaForCausalLM(ABC):
 
                     if len(i) > 2:
                         cur_image_features = torch.stack(cur_image_features, dim=0)
-
-                    # cur_image_features: (#frames, 576, 1024)
-
-                        cur_image_features = self.project(cur_image_features, input_type="video")
+                        # cur_image_features: (#frames, 576, 1024)
+                        projection_outputs = self.project(cur_image_features, input_type="video")
+                        cur_image_features = projection_outputs["image_token_embeds"]
+                        # cur_image_features: (1, 64+32+16, 1024)
                         t, l, n = cur_image_features.size()
                         cur_image_features = cur_image_features.contiguous().view(t * l, n)
                     else:
                         cur_image_features = torch.stack(cur_image_features, dim=0)
-                        cur_image_features = self.project(cur_image_features, input_type="image")
+                        projection_outputs = self.project(cur_image_features, input_type="image")
+                        cur_image_features = projection_outputs["image_token_embeds"]
                         t, l, n = cur_image_features.size()
                         cur_image_features = cur_image_features.contiguous().view(t * l, n)
+
+                    cur_position_ids = projection_outputs['position_ids'].squeeze(0)
+                    cur_image_token_embeds_max_positions = projection_outputs['max_positions']
 
                     if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start - 1]).detach())
@@ -611,27 +728,21 @@ class ChatUniViMetaForCausalLM(ABC):
                             cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
                             cur_new_labels.append(cur_labels[image_token_end:image_token_end + 1])
                             cur_labels = cur_labels[image_token_end + 2:]
+                        cur_new_position_ids.append(torch.arange(cur_position_ids_start, cur_position_ids_start+image_token_start, device=input_ids.device, dtype=torch.long))
+                        cur_new_position_ids.append(cur_position_ids_start + image_token_start + cur_position_ids + 1)
+                        cur_position_ids_start += image_token_start + cur_image_token_embeds_max_positions + 1
                     else:
-                        
-
-                        # import json, logging
-                        # logging.info('prepare_inputs_labels_for_multimodal before apply embed_tokens to cur_input_ids: '+ json.dumps({
-                        #     'self.device': str(self.device),
-                        #     'mm_projector.device': str(self.get_model().mm_projector.weight.device),
-                        #     'embed_tokens.device': str(self.get_model().embed_tokens.weight.device),
-                        #     'input_ids.device': str(input_ids.device),
-                        #     'images.device': str(images.device),
-                        #     'attention_mask.device': str(attention_mask.device),
-                        #     'image_features.device': str(image_features.device),
-                        #     'cur_input_ids': str(cur_input_ids[:image_token_start].device),
-                        # }, indent=4))
-
+                        # [(#tokens, D), ...]
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
                         cur_new_input_embeds.append(cur_image_features)
                         if labels is not None:
-                            cur_new_labels.append(cur_labels[:image_token_start])
+                            cur_new_labels.append(cur_labels[:image_token_start])  # [(#tokens,), ...]
+                            # append label for visual tokens of size (#tokens, ) with value -100
                             cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
-                            cur_labels = cur_labels[image_token_end + 1:]
+                            cur_labels = cur_labels[image_token_end+1:]
+                        cur_new_position_ids.append(torch.arange(cur_position_ids_start, cur_position_ids_start+image_token_start, device=input_ids.device, dtype=torch.long))
+                        cur_new_position_ids.append(cur_position_ids_start + image_token_start + cur_position_ids)
+                        cur_position_ids_start += image_token_start + cur_image_token_embeds_max_positions # skip <image> token
 
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end',
                                                                                   False):
@@ -652,10 +763,14 @@ class ChatUniViMetaForCausalLM(ABC):
                 # (B, N, D)
                 cur_image_features = torch.stack(cur_image_features, dim=0)
                 # (B, 64+32+16=112, D)
-                cur_image_features = self.project(cur_image_features, input_type="image")
+                projection_outputs = self.project(cur_image_features, input_type="image")
+                cur_image_features = projection_outputs["image_token_embeds"]
                 t, l, n = cur_image_features.size()
                 # (B*112, D)
                 cur_image_features = cur_image_features.contiguous().view(t * l, n)
+                cur_position_ids = projection_outputs['position_ids'].squeeze(0)
+                cur_image_token_embeds_max_positions = projection_outputs['max_positions']
+
 
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
                     cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start-1]).detach())
@@ -667,6 +782,9 @@ class ChatUniViMetaForCausalLM(ABC):
                         cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
                         cur_new_labels.append(cur_labels[image_token_end:image_token_end+1])
                         cur_labels = cur_labels[image_token_end+2:]
+                    cur_new_position_ids.append(torch.arange(cur_position_ids_start, cur_position_ids_start+image_token_start, device=input_ids.device, dtype=torch.long))
+                    cur_new_position_ids.append(cur_position_ids_start + image_token_start + cur_position_ids)
+                    cur_position_ids_start += image_token_start + cur_image_token_embeds_max_positions + 1
                 else:
                     # this branch since `tune_mm_mlp_adapter` typically set to False
                     cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
@@ -675,6 +793,9 @@ class ChatUniViMetaForCausalLM(ABC):
                         cur_new_labels.append(cur_labels[:image_token_start])
                         cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
                         cur_labels = cur_labels[image_token_end+1:]
+                    cur_new_position_ids.append(torch.arange(cur_position_ids_start, cur_position_ids_start+image_token_start, device=input_ids.device, dtype=torch.long))
+                    cur_new_position_ids.append(cur_position_ids_start + image_token_start + cur_position_ids)
+                    cur_position_ids_start += image_token_start + cur_image_token_embeds_max_positions
 
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
                     cur_input_ids = cur_input_ids[image_token_end+2:]
@@ -691,25 +812,36 @@ class ChatUniViMetaForCausalLM(ABC):
                     cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
                 if labels is not None:
                     cur_new_labels.append(cur_labels)
+                cur_new_position_ids.append(torch.arange(cur_position_ids_start, cur_position_ids_start + cur_input_ids.shape[0], device=input_ids.device, dtype=torch.long))
+            
             cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
+            # (seq_len, D)
             cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
             new_input_embeds.append(cur_new_input_embeds)
             if labels is not None:
                 cur_new_labels = torch.cat(cur_new_labels, dim=0)
                 new_labels.append(cur_new_labels)
-
+            # (seq_len,)
+            cur_new_position_ids = torch.cat(cur_new_position_ids, dim=0)
+            new_position_ids.append(cur_new_position_ids)
 
         # does padding to longest sequence.
+        # does not take into account of pad left/right. just implements pad right.
+        # therefore, only works for batched training & batch_size=1 inference.
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
             max_len = max(x.shape[0] for x in new_input_embeds)
 
             new_input_embeds_align = []
             for cur_new_embed in new_input_embeds:
+                # [(#token_b=1, D), ..., (#tokens_b=B, D)] -> [(max_len, D), ..., (max_len, D)]
                 cur_new_embed = torch.cat((cur_new_embed, torch.zeros((max_len - cur_new_embed.shape[0], cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)), dim=0)
                 new_input_embeds_align.append(cur_new_embed)
+            # (B, max_seq, D)
             new_input_embeds = torch.stack(new_input_embeds_align, dim=0)
 
             if labels is not None:
+                # wpq: padding left/right not done correctly.
+                # but since `labels` only supplied during training, always pad right. therefore runs ok.
                 new_labels_align = []
                 _new_labels = new_labels
                 for cur_new_label in new_labels:
@@ -717,26 +849,47 @@ class ChatUniViMetaForCausalLM(ABC):
                     new_labels_align.append(cur_new_label)
                 new_labels = torch.stack(new_labels_align, dim=0)
 
+            if new_position_ids is not None:
+                # pad 0 to position_ids on the right if sequence is too short.
+                new_position_ids_align = []
+                for cur_new_position_ids in new_position_ids:
+                    cur_new_position_ids = torch.cat((cur_new_position_ids, torch.full((max_len - cur_new_position_ids.shape[0],), 0, dtype=cur_new_position_ids.dtype, device=cur_new_position_ids.device)), dim=0)
+                    new_position_ids_align.append(cur_new_position_ids)
+                new_position_ids = torch.stack(new_position_ids_align, dim=0)
+                assert(new_position_ids.shape == new_input_embeds.shape[:2])
+
             if attention_mask is not None:
                 new_attention_mask = []
+                # `attention_mask`: padded to max_seq before `input_embed` is expanded to replace <image>
+                # `labels`: padded to max_seq before `labels` is expanded to replace <image>
+                # `cur_new_labels`: token embeds that expands <image> to tokens.
+                # `cur_new_labels_align`: token embeds that expands <image> to tokens padded to max_seq in batch
                 for cur_attention_mask, cur_new_labels, cur_new_labels_align in zip(attention_mask, _new_labels, new_labels):
+                    # for SFT, we know that image is always attended to, therefore can just prepend 
+                    # [True, ..., True] to the attention mask.
+                    #         mask toks from <image>       original attn mask       pad to max_seq
+                    # concat: [True, ..., True]         [True, True, ..., False] [False, ..., False]
                     new_attn_mask_pad_left = torch.full((cur_new_labels.shape[0] - labels.shape[1],), True, dtype=attention_mask.dtype, device=attention_mask.device)
                     new_attn_mask_pad_right = torch.full((cur_new_labels_align.shape[0] - cur_new_labels.shape[0],), False, dtype=attention_mask.dtype, device=attention_mask.device)
                     cur_new_attention_mask = torch.cat((new_attn_mask_pad_left, cur_attention_mask, new_attn_mask_pad_right), dim=0)
                     new_attention_mask.append(cur_new_attention_mask)
                 attention_mask = torch.stack(new_attention_mask, dim=0)
                 assert attention_mask.shape == new_labels.shape
+
         else:
             new_input_embeds = torch.stack(new_input_embeds, dim=0)
             if labels is not None:
                 new_labels = torch.stack(new_labels, dim=0)
 
+            if new_position_ids is not None:
+                new_position_ids = torch.stack(new_position_ids, dim=0)
+
             if attention_mask is not None:
                 new_attn_mask_pad_left = torch.full((attention_mask.shape[0], new_input_embeds.shape[1] - input_ids.shape[1]), True, dtype=attention_mask.dtype, device=attention_mask.device)
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
                 assert attention_mask.shape == new_input_embeds.shape[:2]
-
-        return None, attention_mask, past_key_values, new_input_embeds, new_labels
+        
+        return None, attention_mask, past_key_values, new_input_embeds, new_labels, new_position_ids
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:

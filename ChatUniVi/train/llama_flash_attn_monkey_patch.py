@@ -29,8 +29,11 @@ def forward(
 
     attention_mask: [bsz, q_len]
     """
+
+    # (B, L, D) e.g., (2, 323, 4096)
     bsz, q_len, _ = hidden_states.size()
 
+    # (B, L, #heads, head_dim) -> (B, #heads, L, head_dim) e.g., (2, 32, 323, 128)
     query_states = (
         self.q_proj(hidden_states)
         .view(bsz, q_len, self.num_heads, self.head_dim)
@@ -49,10 +52,15 @@ def forward(
     # [bsz, q_len, nh, hd]
     # [bsz, nh, q_len, hd]
 
+    # =L e.g., 323
     kv_seq_len = key_states.shape[-2]
     assert past_key_value is None, "past_key_value is not supported"
+    # wpq: if position_ids not consecutive, then take max of position_ids
+    kv_seq_len = max(position_ids.max().item()+1, kv_seq_len)
 
+    # (1, 1, L, head_dim)
     cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+    # position_ids: (1, L) e.g., (1, 323) simply [[0, 1, 2, ..., 322]]
     query_states, key_states = apply_rotary_pos_emb(
         query_states, key_states, cos, sin, position_ids
     )
