@@ -181,6 +181,46 @@ def ravel_multi_index(coords, shape):
     return (coords * coefs).sum(dim=-1)
 
 
+def regularize_covariance(cov, epsilon=1e-6):
+    regularization = epsilon * torch.eye(cov.shape[-1], device=cov.device)
+    return cov + regularization
+
+def sample_truncated_normal(mean, covariance, vol_shape=None, num_samples=1, truncation_stddev_factor=2, epsilon=1e-6):
+    """Sample from 3D Gaussian defined by `mean` and `covariance`.
+            `mean`    (N1, ..., Nd, 3)
+            `cov`     (N1, ..., Nd, 3, 3)
+            Returns   (#samples, N1, ..., Nd, 3)
+                samples from 3d gaussian
+    """
+    import torch.distributions as dist
+    device = mean.device
+    if vol_shape is not None:
+        vol_shape = torch.tensor(vol_shape, device=device)
+    shape_start = mean.shape[:-1]
+    mean = mean.reshape(-1, 3)
+    covariance = covariance.reshape(-1, 3, 3)
+    all_samples = torch.zeros((num_samples, mean.shape[0]) + (3,), device=device)
+    for idx in range(mean.shape[0]):
+        current_mean = mean[idx]
+        current_cov = covariance[idx]
+        for i in range(math.ceil(math.log(1/epsilon, 10)) + 1):
+            try:
+                mvn = dist.MultivariateNormal(current_mean, current_cov)
+            except:
+                current_cov = regularize_covariance(current_cov, epsilon=epsilon*(10**i))
+        samples = []
+        while len(samples) < num_samples:
+            sample = mvn.sample()  # (3,)
+            std_devs = (sample - current_mean).abs() / torch.sqrt(torch.diag(current_cov))  # (3,)
+            if torch.all(std_devs <= truncation_stddev_factor):
+                if vol_shape is not None and torch.all(sample >= 0) and torch.all(sample < vol_shape):
+                    samples.append(sample)
+                elif vol_shape is None:
+                    samples.append(sample)
+        samples = torch.stack(samples)  # (num_samples, 3)
+        all_samples[:, idx, :] = samples
+    all_samples = all_samples.reshape((num_samples,) + shape_start + (3,))
+    return all_samples
 
 
 class ChatUniViMetaForCausalLM(ABC):
@@ -304,12 +344,24 @@ class ChatUniViMetaForCausalLM(ABC):
             
             T = MAX_IMAGE_LENGTH
             H = W = int(self.get_model().get_vision_tower().config.image_size / self.get_model().get_vision_tower().config.patch_size)
-
+            
             if kvs['enc'] == 'pos3dravel':
                 if 'cluster_means' not in token_merging_outputs: return outputs
                 # (B, N, 3)
                 P = token_merging_outputs['cluster_means']
                 P = torch.floor(P).to(torch.long) # discretize
+                # (B, N)
+                P = ravel_multi_index(P, (1, H, W)) # note T length does not matter when ravel multi-index
+            elif kvs['enc'] == 'pos3dsampleravel':
+                if 'cluster_means' not in token_merging_outputs or 'cluster_covs' not in token_merging_outputs: return outputs
+                truncation_stddev_factor = kvs.get('truncstd', 2)
+                # (B, N, 3)
+                P = sample_truncated_normal(
+                    token_merging_outputs['cluster_means'],
+                    token_merging_outputs['cluster_covs'],
+                    vol_shape=(T, H, W),
+                    truncation_stddev_factor=truncation_stddev_factor,
+                    num_samples=1)[0]
                 # (B, N)
                 P = ravel_multi_index(P, (1, H, W)) # note T length does not matter when ravel multi-index
             elif kvs['enc'] == 'pos1d':
@@ -319,7 +371,6 @@ class ChatUniViMetaForCausalLM(ABC):
                 raise ValueError(f"[positional_encoding] enc={kvs['enc']} not implemented.")
 
             # max(P) can be at most 64*24*24=36,864 tokens for video. Normalize to kvs['vidmaxpos']
-
             scale_position_ids = bool(kvs.get('scalepos', 0))
             if scale_position_ids:
                 if input_type == 'image':
@@ -337,7 +388,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 # sort_score: (B, N)
                 if token_ordering == "random":
                     sort_score = torch.rand_like(P)
-                elif token_ordering == "raster":
+                elif token_ordering in ("raster", "sort"):
                     sort_score = P
                 else:
                     raise ValueError(f"[positional_encoding] token_ordering={token_ordering} not implemented.")
@@ -349,7 +400,7 @@ class ChatUniViMetaForCausalLM(ABC):
                     torch.take_along_dim(image_token_embeds[b], inds[b, :, None].repeat(1, image_token_embeds.shape[-1]), dim=0) for b in range(B)])
 
             # decides what next position_id should be after image tokens
-            max_positions_type = kvs.get('maxpostype', None)
+            max_positions_type = kvs.get('maxpostype', 'add1')
             if  max_positions_type is not None:
                 if max_positions_type == 'add1': 
                     # if position_ids=[0,1,2], then position_ids_max=3
@@ -818,22 +869,6 @@ class ChatUniViMetaForCausalLM(ABC):
             cur_new_position_ids = torch.cat(cur_new_position_ids, dim=0)
             new_position_ids.append(cur_new_position_ids)
 
-            #     print(e)
-            #     print({
-            #         'input_ids': input_ids,
-            #         'labels': labels,
-            #     })
-            #     print({
-            #         'input_ids': input_ids.shape,
-            #         'images': images.shape,
-            #         'cur_new_input_embeds': [x.shape for x in cur_new_input_embeds],
-            #         'cur_new_labels': [x.shape for x in cur_new_labels],
-            #         'cur_new_position_ids': [x.shape for x in cur_new_position_ids],
-            #     })
-
-
-        
-            
 
         # does padding to longest sequence.
         # does not take into account of pad left/right. just implements pad right.
