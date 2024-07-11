@@ -47,4 +47,10 @@ DataConfig = {
     'vcg100k+llava665k': [VIDEO, LLaVA],
     'vcg100k+llava200k': [VIDEO, LLaVA200k],
     'vit150k+vcg100k+llava665k': [VIT, VIDEO, LLaVA],
+    # image only
+    'llavalcs300k': [pretrain_llava_300k],
+    'llava200k': [LLaVA200k],
+    # video only
+    'valley300k': [pretrain_valley_300k],
+    'vcg100k': [VIDEO],
 }

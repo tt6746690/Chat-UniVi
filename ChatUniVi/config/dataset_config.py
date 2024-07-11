@@ -63,16 +63,36 @@ LLaVA = {
 # each dictionary contains `chat_path` that points to the questions
 # the rest kv pairs are image folders.
 
+
+pretrain_valley = {
+    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_existfiltered.json",
+    "valley": "/fsx/wpq/.data/videollava/",
+}
+
+pretrain_valley_300k = {
+    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_existfiltered_300k.json",
+    "valley": "/fsx/wpq/.data/videollava/",
+}
+
+pretrain_llava = {
+    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_existfiltered.json",
+    "llava": "/fsx/wpq/.data/videollava/",
+}
+
+pretrain_llava_300k = {
+    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_existfiltered_300k.json",
+    "llava": "/fsx/wpq/.data/videollava/",
+}
+
 Pretrain_valley_llava = {
     # filter the json to remove ones where valley videos are missing.
     "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_llavaimage_existfiltered.json",
     # following two get image/video from Video-LLaVA hf dataset repo.
-    # should contain folder: `valley`
+    # should contain folder: `valley` 
     "valley": "/fsx/wpq/.data/videollava/",
     # should contain folder: `llava_image`
     "llava": "/fsx/wpq/.data/videollava/",
 }
-
 
 Pretrain_valley_llava_300k = {
     "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_llavaimage_existfiltered_300k.json",
@@ -91,7 +111,6 @@ LLaVA200k = {
     "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_tune_200k.json",
     "llava": "/fsx/wpq/.data/videollava/",
 }
-
 
 
 VIDEO = {
