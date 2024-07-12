@@ -262,6 +262,7 @@ class ChatUniViMetaForCausalLM(ABC):
             "max_positions": torch.tensor(N, device=device),
         }
 
+        ## only add position_encoding if use token clustering & pe_type is supplied.
         config = self.get_model().config
         if not hasattr(config, "config") or config.config.get('pe_type', None) is None:
             return outputs
@@ -344,7 +345,33 @@ class ChatUniViMetaForCausalLM(ABC):
             
             T = MAX_IMAGE_LENGTH
             H = W = int(self.get_model().get_vision_tower().config.image_size / self.get_model().get_vision_tower().config.patch_size)
-            
+
+            event_id_as_z = bool(kvs.get('eventidasz', 0))
+            if event_id_as_z and input_type == 'video':
+                # has to return events. should not be used for module that does not group frames to events/segments.
+                # - note this also modifies `token_merging_outputs['cluster_means/covs']` in place.
+                # - note should also set kvs['vidmaxpos'] properly.
+                if 'events' in token_merging_outputs and 'sample_ratios_temporal' in config.config and 'cluster_means' in token_merging_outputs and 'cluster_covs' in token_merging_outputs:
+                    events = token_merging_outputs['events']
+                    sample_ratio_temporal = config.config['sample_ratios_temporal'][0]
+                    cluster_means = token_merging_outputs['cluster_means']
+                    cluster_covs = token_merging_outputs['cluster_covs']
+                    ## update time dimension size to be `num_events`
+                    T = max(math.ceil(T * sample_ratio_temporal), 1)
+                    ## adjust mean/cov properly after scale s.t. z is event_id instead of frame number
+                    # (3, 3): scale z (first) direction by sample_ratio_temporal
+                    A = torch.diag(torch.tensor([sample_ratio_temporal if sample_ratio_temporal <= 1 else 1/sample_ratio_temporal, 1, 1], device=cluster_means.device, dtype=cluster_means.dtype))
+                    # apply to mean. Aμ & covariance AΣAᵀ. cluster_means = cluster_means @ A.T
+                    cluster_covs = (A @ cluster_covs @ A.T)
+                    ## since event may consistute non-consecutive frames, force z to be [0, ..., num_events-1]
+                    # (B, N) convert z-axis value to the corresponding event_id
+                    cluster_means_z = torch.floor(cluster_means[...,0]).to(torch.long)
+                    for event_id, event_frame_ids in enumerate(events):
+                        cluster_means_z[torch.isin(cluster_means_z, torch.tensor(event_frame_ids, device=cluster_means_z.device))] = event_id
+                    cluster_means[...,:, 0] = cluster_means_z + 1/2 # consistent with convention.
+                    token_merging_outputs['cluster_means'] = cluster_means 
+                    token_merging_outputs['cluster_covs'] = cluster_covs
+
             if kvs['enc'] == 'pos3dravel':
                 if 'cluster_means' not in token_merging_outputs: return outputs
                 # (B, N, 3)
@@ -364,6 +391,23 @@ class ChatUniViMetaForCausalLM(ABC):
                     num_samples=1)[0]
                 # (B, N)
                 P = ravel_multi_index(P, (1, H, W)) # note T length does not matter when ravel multi-index
+            elif kvs['enc'].startswith('pos3dhilbert'):
+                if 'cluster_means' not in token_merging_outputs: return outputs
+                # (B, N, 3)
+                P = token_merging_outputs['cluster_means']
+                if getattr(self, 'hilbert_curve', None) is None:
+                    from metasummer2024.gilbert3d import gilbert3d
+                    # (T*H*W, 3)
+                    if kvs['enc'] == 'pos3dhilbert2':
+                        # the same 2d hilbert curve, for each fram.
+                        self.hilbert_curve = torch.tensor(list(gilbert3d(1, H, W)), dtype=P.dtype, device=P.device) + 1/2
+                        self.hilbert_curve = torch.cat([self.hilbert_curve + torch.tensor([[i, 0, 0]], device=P.device, dtype=P.dtype) for i in range(T)], dim=0)
+                    else:
+                        self.hilbert_curve = torch.tensor(list(gilbert3d(T, H, W)), dtype=P.dtype, device=P.device) + 1/2
+                # (B, N, T*H*W)
+                distances = torch.cdist(P, self.hilbert_curve[None, ...].repeat(P.shape[0], 1, 1))
+                # (B, N)
+                P = distances.argmin(dim=-1)
             elif kvs['enc'] == 'pos1d':
                 # (B, N)
                 P = torch.arange(N, device=device, dtype=torch.float32).reshape(1, N).repeat(B, 1)
