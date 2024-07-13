@@ -181,6 +181,70 @@ def ravel_multi_index(coords, shape):
     return (coords * coefs).sum(dim=-1)
 
 
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    # x: (B, #heads, L, D)
+    # for each (b, head, l), create two halfs q = (q0, q1, q2, q3) and returns (-q2, -q3, q0, q1)
+    # as complex number: (q0+i*q2, q1+i*q3)
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def rope3d(X, P, num_heads=1, theta_type='1d', divbase=10_000., channel_partition='interleave'):
+    """Apply multi-dim positions `P` to features `X` via RoPE.
+        This is somewhat in line with how huggingface's llama impl that 
+            - treat (x0, xd/2-1) as a complex number.
+            - applies rope to dimension of embedding of each head.
+
+        `X`    (B, L, D_hidden)
+            either key or query vector
+        `P`    (B, L, ndim) 
+            - if ndim=1 and theta_type='1d', reduces to 1D RoPE.
+            - if ndim>1, then encodes multi-dimensional positions into features `X`
+    """
+    device = X.device
+    dtype = X.dtype
+    B, L, D_hidden = X.shape
+    ndim = P.shape[-1]
+    # (B, L, D_hidden) -> (B, L, #heads, D) -> (B, #heads, L, D) where D is dimension of each head.
+    X = X.view(B, L, num_heads, D_hidden//num_heads).transpose(1, 2)
+    D = X.shape[-1]
+
+    # inv_freq: (D//2,)
+    # 1d: θ_0, θ_1, ... θ_d/2-1
+    # tied: θ_z0, θ_y0, θ_x0, θ_z1, θ_y1, θ_x1, ..., θ_zd/6, θ_yd/6, θ_xd/6  (channel_partition == 'interleave')
+    # tied: θ_z0, θ_z1, ..., θ_zd/6, ..., θ_x0, θ_x1, ..., θ_zx/6  (channel_partition == 'sequential')
+    if theta_type == '1d':
+        inv_freq = 1.0 / (divbase ** (torch.arange(0, D, 2).float().to(device) / D))
+    elif theta_type == 'tie':
+        inv_freq = 1.0 / (divbase ** (torch.arange(0, D, 2*ndim).float().to(device) / D))
+        inv_freq = inv_freq.repeat_interleave(ndim) if channel_partition == 'interleave' else inv_freq.repeat(ndim)
+        inv_freq = inv_freq[:(D // 2)]
+    else:
+        raise ValueError(f'Invalid theta_type={theta_type}')
+    # (B, L, D//2): freqs = torch.einsum("...i,j->...ij", P, inv_freq) # outer product
+    rep = (D//2) // ndim
+    rem = (D//2)  % ndim
+    # (B, L, 3) -> (B, L, D//2) where last dim repeat [z,y,x] -> [z,y,x,z,y,x,...,z,y,x]
+    P_expand = torch.cat((
+        P.repeat((1,)*len(P.shape[:-1]) + (rep,)) if channel_partition == 'interleave' else P.repeat_interleave(rep, dim=-1),
+        torch.zeros(P.shape[:-1] + (rem,), dtype=dtype, device=device)), dim=-1)
+    # (B, L, D//2) * (D//2,) -> (B, L, D//2)
+    freqs = (P_expand * inv_freq)
+    # (B, L, D)
+    emb = torch.cat((freqs, freqs), dim=-1) # each embedding: i, i+D//2 is same 
+    cos = emb.cos()[:, None, ...].to(dtype=dtype)
+    sin = emb.sin()[:, None, ...].to(dtype=dtype)
+    # for each batch item, each head in MHA, do the following operation on (L, D)
+    # (B, #heads, L, D)
+    X = (X * cos) + (rotate_half(X) * sin)
+    # (B, #heads, L, D) -> (B, L, D_hidden)
+    X = X.transpose(1, 2).reshape(B, L, D_hidden)
+
+    return X
+
+
 def regularize_covariance(cov, epsilon=1e-6):
     regularization = epsilon * torch.eye(cov.shape[-1], device=cov.device)
     return cov + regularization
@@ -221,6 +285,40 @@ def sample_truncated_normal(mean, covariance, vol_shape=None, num_samples=1, tru
         all_samples[:, idx, :] = samples
     all_samples = all_samples.reshape((num_samples,) + shape_start + (3,))
     return all_samples
+
+
+def treat_z_as_event_id(token_merging_outputs, T, config):
+    # has to return events. should not be used for module that does not group frames to events/segments.
+    # - note this also modifies `token_merging_outputs['cluster_means/covs']` in place.
+    # - note should also set kvs['vidmaxpos'] properly.
+    if not ('events' in token_merging_outputs and 
+            'sample_ratios_temporal' in config.config 
+            and 'cluster_means' in token_merging_outputs 
+            and 'cluster_covs' in token_merging_outputs):
+        return token_merging_outputs, T
+        
+    events = token_merging_outputs['events']
+    sample_ratio_temporal = config.config['sample_ratios_temporal'][0]
+    cluster_means = token_merging_outputs['cluster_means']
+    cluster_covs = token_merging_outputs['cluster_covs']
+    ## update time dimension size to be `num_events`
+    T = max(math.ceil(T * sample_ratio_temporal), 1)
+    ## adjust mean/cov properly after scale s.t. z is event_id instead of frame number
+    # (3, 3): scale z (first) direction by sample_ratio_temporal
+    A = torch.diag(torch.tensor([sample_ratio_temporal if sample_ratio_temporal <= 1 else 1/sample_ratio_temporal, 1, 1], device=cluster_means.device, dtype=cluster_means.dtype))
+    # apply to mean. Aμ & covariance AΣAᵀ. cluster_means = cluster_means @ A.T
+    cluster_covs = (A @ cluster_covs @ A.T)
+    ## since event may consistute non-consecutive frames, force z to be [0, ..., num_events-1]
+    # (B, N) convert z-axis value to the corresponding event_id
+    cluster_means_z = torch.floor(cluster_means[...,0]).to(torch.long)
+    for event_id, event_frame_ids in enumerate(events):
+        cluster_means_z[torch.isin(cluster_means_z, torch.tensor(event_frame_ids, device=cluster_means_z.device))] = event_id
+    cluster_means[...,:, 0] = cluster_means_z + 1/2 # consistent with convention.
+    token_merging_outputs['cluster_means'] = cluster_means 
+    token_merging_outputs['cluster_covs'] = cluster_covs
+    
+    return token_merging_outputs, T
+
 
 
 class ChatUniViMetaForCausalLM(ABC):
@@ -341,6 +439,24 @@ class ChatUniViMetaForCausalLM(ABC):
             outputs.update({
                 "image_token_embeds": image_token_embeds,
             })
+        elif kvs[0] == 'rope3d':
+            T = MAX_IMAGE_LENGTH
+
+            event_id_as_z = bool(kvs.get('eventidasz', 0))
+            if event_id_as_z and input_type == 'video':
+                token_merging_outputs, T = treat_z_as_event_id(token_merging_outputs, T, config)
+
+            image_token_embeds = rope3d(
+                image_token_embeds,
+                token_merging_outputs['cluster_means'] - 1/2,
+                num_heads=kvs.get('nh', 32),
+                theta_type=kvs.get('thetatype', '1d'),
+                divbase=kvs.get('divbase', 10_000.),
+                channel_partition=kvs.get('chpartition', 'interleave'),
+            )
+            outputs.update({
+                "image_token_embeds": image_token_embeds,
+            })
         elif kvs[0] == 'rope1d':
             
             T = MAX_IMAGE_LENGTH
@@ -348,29 +464,7 @@ class ChatUniViMetaForCausalLM(ABC):
 
             event_id_as_z = bool(kvs.get('eventidasz', 0))
             if event_id_as_z and input_type == 'video':
-                # has to return events. should not be used for module that does not group frames to events/segments.
-                # - note this also modifies `token_merging_outputs['cluster_means/covs']` in place.
-                # - note should also set kvs['vidmaxpos'] properly.
-                if 'events' in token_merging_outputs and 'sample_ratios_temporal' in config.config and 'cluster_means' in token_merging_outputs and 'cluster_covs' in token_merging_outputs:
-                    events = token_merging_outputs['events']
-                    sample_ratio_temporal = config.config['sample_ratios_temporal'][0]
-                    cluster_means = token_merging_outputs['cluster_means']
-                    cluster_covs = token_merging_outputs['cluster_covs']
-                    ## update time dimension size to be `num_events`
-                    T = max(math.ceil(T * sample_ratio_temporal), 1)
-                    ## adjust mean/cov properly after scale s.t. z is event_id instead of frame number
-                    # (3, 3): scale z (first) direction by sample_ratio_temporal
-                    A = torch.diag(torch.tensor([sample_ratio_temporal if sample_ratio_temporal <= 1 else 1/sample_ratio_temporal, 1, 1], device=cluster_means.device, dtype=cluster_means.dtype))
-                    # apply to mean. Aμ & covariance AΣAᵀ. cluster_means = cluster_means @ A.T
-                    cluster_covs = (A @ cluster_covs @ A.T)
-                    ## since event may consistute non-consecutive frames, force z to be [0, ..., num_events-1]
-                    # (B, N) convert z-axis value to the corresponding event_id
-                    cluster_means_z = torch.floor(cluster_means[...,0]).to(torch.long)
-                    for event_id, event_frame_ids in enumerate(events):
-                        cluster_means_z[torch.isin(cluster_means_z, torch.tensor(event_frame_ids, device=cluster_means_z.device))] = event_id
-                    cluster_means[...,:, 0] = cluster_means_z + 1/2 # consistent with convention.
-                    token_merging_outputs['cluster_means'] = cluster_means 
-                    token_merging_outputs['cluster_covs'] = cluster_covs
+                token_merging_outputs, T = treat_z_as_event_id(token_merging_outputs, T, config)
 
             if kvs['enc'] == 'pos3dravel':
                 if 'cluster_means' not in token_merging_outputs: return outputs
@@ -401,7 +495,7 @@ class ChatUniViMetaForCausalLM(ABC):
                     if kvs['enc'] == 'pos3dhilbert2':
                         # the same 2d hilbert curve, for each fram.
                         self.hilbert_curve = torch.tensor(list(gilbert3d(1, H, W)), dtype=P.dtype, device=P.device) + 1/2
-                        self.hilbert_curve = torch.cat([self.hilbert_curve + torch.tensor([[i, 0, 0]], device=P.device, dtype=P.dtype) for i in range(T)], dim=0)
+                        self.hilbert_curve = torch.cat([self.hilbert_curve + torch.tensor([[t, 0, 0]], device=P.device, dtype=P.dtype) for t in range(T)], dim=0)
                     else:
                         self.hilbert_curve = torch.tensor(list(gilbert3d(T, H, W)), dtype=P.dtype, device=P.device) + 1/2
                 # (B, N, T*H*W)
