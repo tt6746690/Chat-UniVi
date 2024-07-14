@@ -488,13 +488,14 @@ class TokenMergeClusterDPCKNN(nn.Module):
     """Token merging with dpc-knn. Agnostic of dimension of features (e.g., 1d, image, video).
     but need to supply `self.forward` with properly constructed `token_dict`."""
 
-    def __init__(self, sample_ratios, ks, coord_weight, token_ordering, prune_ratios=None):
+    def __init__(self, sample_ratios, ks, coord_weight, token_ordering, prune_ratios=None, flow='sequential'):
         super().__init__()
         self.sample_ratios = sample_ratios
         self.ks = ks
         self.coord_weight = coord_weight
         self.token_ordering = token_ordering
         self.prune_ratios = prune_ratios if prune_ratios else [None]*len(sample_ratios)
+        self.flow = flow
 
         # not really used anywhere
         embed_dim = 1024
@@ -523,10 +524,12 @@ class TokenMergeClusterDPCKNN(nn.Module):
         """
         token_dict_list = [token_dict]
         for ctm, block in zip(self.ctms, self.tc_blocks):
-            # x: (B, N, D) -> (B, #clusters, D)
-            # coord: (B, N, coord_dim) -> (B, #clusters, coord_dim)
-            token_dict = block(ctm(token_dict))
-            token_dict_list.append(token_dict)
+            if self.flow == 'sequential':
+                token_dict_list.append(block(ctm(token_dict_list[-1])))
+            elif self.flow == 'parallel':
+                token_dict_list.append(block(ctm(token_dict_list[0])))
+            else:
+                raise ValueError(f"flow={self.flow} not valid.")
         return token_dict_list
 
     def merge_image_tokens(self, image_features):
@@ -643,7 +646,8 @@ class TokenMergeClusterDPCKNN(nn.Module):
                 str(self.ks).replace(" ", "") + ",",
                 str(self.coord_weight) + ",",
                 str(self.token_ordering) + ",",
-                str(self.prune_ratios),
+                str(self.prune_ratios) + ",",
+                str(self.flow),
                 ")",
             ]
         )
@@ -661,6 +665,7 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
         token_orderings,
         prune_ratios_spatial,
         prune_ratios_video,
+        flow,
     ):
         super().__init__()
         coord_weight_temporal, coord_weight_spatial, coord_weight_video = coord_weights
@@ -673,13 +678,15 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
             ks=ks[:1],
             coord_weight=coord_weight_temporal,
             token_ordering=token_ordering_temporal,
+            flow=flow,
         )
         self.token_merge_image = TokenMergeClusterDPCKNN(
             sample_ratios=sample_ratios_spatial,
-            ks=ks,
+            ks=ks[:len(sample_ratios_spatial)],
             coord_weight=coord_weight_spatial,
             token_ordering=token_ordering_spatial,
             prune_ratios=prune_ratios_spatial,
+            flow=flow, # only this flow mattered.
         )
         self.token_merge_video_list = torch.nn.ModuleList(
             [
@@ -688,7 +695,8 @@ class VideoTokenMergeClusterDPCKNN(nn.Module):
                     ks=[k],
                     coord_weight=coord_weight_video,
                     token_ordering=token_ordering_video,
-                    prune_ratios=[prune_ratio]
+                    prune_ratios=[prune_ratio],
+                    flow=flow,
                 )
                 for sample_ratio, k, prune_ratio in zip(
                         sample_ratios_video,

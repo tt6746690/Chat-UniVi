@@ -81,8 +81,7 @@ class ModelArguments:
     prune_ratios_spatial: Optional[List[int]] = field(default=None)
     prune_ratios_video: Optional[List[int]] = field(default=None)
     pe_type: Optional[str] = field(default=None)
-
-
+    flow: Optional[str] = field(default=None)
 
 
 @dataclass

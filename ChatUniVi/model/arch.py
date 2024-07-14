@@ -109,6 +109,7 @@ class MetaModel:
             token_orderings=model_config['token_orderings'],
             prune_ratios_spatial=model_config.get('prune_ratios_spatial', None),
             prune_ratios_video=model_config.get('prune_ratios_video', None),
+            flow=model_config.get('flow', 'sequential'),
         )
 
     def initialize_cluster_modules_v3(self, model_config):
@@ -124,6 +125,7 @@ class MetaModel:
             coord_weight=coord_weight_spatial,
             token_ordering=token_ordering_spatial,
             prune_ratios=model_config.get('prune_ratios_spatial', None),
+            flow=model_config.get('flow', 'sequential'),
         )
         self.token_merging_video = TokenMergeClusterDPCKNN(
             sample_ratios=sample_ratios_video,
@@ -131,6 +133,7 @@ class MetaModel:
             coord_weight=coord_weight_video,
             token_ordering=token_ordering_video,
             prune_ratios=model_config.get('prune_ratios_video', None),
+            flow=model_config.get('flow', 'sequential'),
         )
 
 
