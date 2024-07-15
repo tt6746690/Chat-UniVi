@@ -575,22 +575,22 @@ class ChatUniViMetaForCausalLM(ABC):
                 image_features, cls_features = torch.mean(image_features, dim=0, keepdim=False).unsqueeze(
                     0), torch.mean(image_features, dim=1, keepdim=False).unsqueeze(0)
                 image_features = torch.cat([image_features, cls_features], dim=1)
-            image_features = self.get_model().mm_projector(image_features)
-            return image_features
-        
-        method_name = f"project_{self.get_model().cluster_type}"
-        if not getattr(self, method_name):
-            raise ValueError(f"[ChatUniViMetaForCausalLM.project] {method_name} not supported.")
-
-        if method_name == 'project_v1':
-            image_features = getattr(self, method_name)(image_features, input_type=input_type)
+            image_token_embeds = self.get_model().mm_projector(image_features)
             token_merging_outputs = None
         else:
-            token_merging_outputs = getattr(self, method_name)(image_features, input_type=input_type)
-            image_features = token_merging_outputs['image_features']
+            method_name = f"project_{self.get_model().cluster_type}"
+            if not getattr(self, method_name):
+                raise ValueError(f"[ChatUniViMetaForCausalLM.project] {method_name} not supported.")
 
-        image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
-        image_token_embeds = self.get_model().mm_projector(image_features)
+            if method_name == 'project_v1':
+                image_features = getattr(self, method_name)(image_features, input_type=input_type)
+                token_merging_outputs = None
+            else:
+                token_merging_outputs = getattr(self, method_name)(image_features, input_type=input_type)
+                image_features = token_merging_outputs['image_features']
+
+            image_features = image_features.to(self.get_model().mm_projector.weight.dtype)
+            image_token_embeds = self.get_model().mm_projector(image_features)
 
         # only applied if `pe_type` in model config.`
         positional_encoding_outputs = self.positional_encoding(image_token_embeds, token_merging_outputs, input_type)

@@ -23,6 +23,15 @@ model_config_finetune = {
     "temporal_cluster_rate": 1/16,
 }
 
+
+## don't do token merging
+
+model_config_v0 = {
+    "cluster_type": "v0",
+    "use_cluster": False,
+}
+
+
 ## wpq: below are model config.
 
 model_config_v1 = {
