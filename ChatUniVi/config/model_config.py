@@ -79,5 +79,6 @@ model_config_v3 = {
 model_config_v4 = {
     "cluster_type": "v4",
     "use_cluster": True,
+    "vision_tune": False,
     "matryoshka_vis_token_scale": None,
 }

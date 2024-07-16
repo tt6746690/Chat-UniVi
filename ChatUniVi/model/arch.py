@@ -1169,5 +1169,5 @@ class ChatUniViMetaForCausalLM(ABC):
                 for p in self.get_input_embeddings().parameters():
                     p.requires_grad = False
                 for p in self.get_output_embeddings().parameters():
-                    p.requires_grad = Fal
+                    p.requires_grad = False
                     

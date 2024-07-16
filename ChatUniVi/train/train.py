@@ -65,7 +65,7 @@ class ModelArguments:
     use_cluster: Optional[bool] = field(default=None)
     freeze: Optional[bool] = field(default=None)
     mm_tune: Optional[bool] = field(default=None)
-    vision_tune: Optional[float] = field(default=None)
+    vision_tune: Optional[bool] = field(default=None)
     spatial_cluster_rate0: Optional[float] = field(default=None)
     spatial_cluster_rate1: Optional[float] = field(default=None)
     spatial_cluster_rate2: Optional[float] = field(default=None)

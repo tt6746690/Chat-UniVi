@@ -5,6 +5,7 @@ set -x
 
 CKPT=$1
 TOKEN_SCALE=$2
+SAVE_DIR=$3
 CONV_MODE=v1
 EVAL_DATA_DIR=/fsx/wpq/.data/eval/mmbench
 SPLIT="mmbench_dev_20230712"
@@ -13,7 +14,7 @@ ANSWER_UPLOAD_DIR=/fsx/wpq/github/metasummer2024/external/LLaVA/playground/answe
 python -m ChatUniVi.eval.model_vqa_mmbench \
     --model-path $CKPT \
     --question-file $EVAL_DATA_DIR/$SPLIT.tsv \
-    --answers-file $CKPT/eval/mmbench/$SPLIT.jsonl \
+    --answers-file $SAVE_DIR/$SPLIT.jsonl \
     --single-pred-prompt \
     --temperature 0 \
     --conv-mode $CONV_MODE  \
@@ -21,8 +22,8 @@ python -m ChatUniVi.eval.model_vqa_mmbench \
 
 python -m ChatUniVi.eval.convert_mmbench_for_submission \
     --annotation-file $EVAL_DATA_DIR/$SPLIT.tsv \
-    --result-dir $CKPT/eval/mmbench \
-    --upload-dir $CKPT/eval/mmbench \
+    --result-dir $SAVE_DIR \
+    --upload-dir $SAVE_DIR \
     --experiment $SPLIT
 
 

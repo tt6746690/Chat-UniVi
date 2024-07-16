@@ -10,6 +10,8 @@ trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
 
 
 CKPT=$1
+TOKEN_SCALE=$2
+SAVE_DIR=$3
 CONV_MODE=v1
 
 MAX_IMAGE_LENGTH=64
@@ -25,9 +27,9 @@ CHUNKS=${#GPULIST[@]}
 
 ## put 3 jobs on the same gpu.
 
-if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
-      ! -f "$CKPT/eval/vcgbench/answers-temporal/merge.jsonl" || \
-      ! -f "$CKPT/eval/vcgbench/answers-consistency/merge.jsonl" ]]; then
+if [[ ! -f "$SAVE_DIR/answers-generic/merge.jsonl" || \
+      ! -f "$SAVE_DIR/answers-temporal/merge.jsonl" || \
+      ! -f "$SAVE_DIR/answers-consistency/merge.jsonl" ]]; then
 
     for IDX in $(seq 0 $((CHUNKS-1))); do
         # generic
@@ -35,7 +37,7 @@ if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
             --model-path $CKPT \
             --question-file $CHATUNIVI_REPO_DIR/ChatUniVi/eval/questions/video_qa/generic_qa.json \
             --video-folder $VIDEO_FOLDER \
-            --answers-file $CKPT/eval/vcgbench/answers-generic/${CHUNKS}_${IDX}.jsonl \
+            --answers-file $SAVE_DIR/answers-generic/${CHUNKS}_${IDX}.jsonl \
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0.2 \
@@ -45,7 +47,7 @@ if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
             --model-path $CKPT \
             --question-file $CHATUNIVI_REPO_DIR/ChatUniVi/eval/questions/video_qa/temporal_qa.json \
             --video-folder $VIDEO_FOLDER \
-            --answers-file $CKPT/eval/vcgbench/answers-temporal/${CHUNKS}_${IDX}.jsonl \
+            --answers-file $SAVE_DIR/answers-temporal/${CHUNKS}_${IDX}.jsonl \
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0.2 \
@@ -55,7 +57,7 @@ if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
             --model-path $CKPT \
             --question-file $CHATUNIVI_REPO_DIR/ChatUniVi/eval/questions/video_qa/consistency_qa.json \
             --video-folder $VIDEO_FOLDER \
-            --answers-file $CKPT/eval/vcgbench/answers-consistency/${CHUNKS}_${IDX}.jsonl \
+            --answers-file $SAVE_DIR/answers-consistency/${CHUNKS}_${IDX}.jsonl \
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0.2 \
@@ -65,65 +67,65 @@ if [[ ! -f "$CKPT/eval/vcgbench/answers-generic/merge.jsonl" || \
     wait
 
     # generic
-    output_file=$CKPT/eval/vcgbench/answers-generic/merge.jsonl
+    output_file=$SAVE_DIR/answers-generic/merge.jsonl
     echo $output_file
     > "$output_file"
     for IDX in $(seq 0 $((CHUNKS-1))); do
-        cat $CKPT/eval/vcgbench/answers-generic/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+        cat $SAVE_DIR/answers-generic/${CHUNKS}_${IDX}.jsonl >> "$output_file"
     done
 
     # temporal
-    output_file=$CKPT/eval/vcgbench/answers-temporal/merge.jsonl
+    output_file=$SAVE_DIR/answers-temporal/merge.jsonl
     echo $output_file
     > "$output_file"
     for IDX in $(seq 0 $((CHUNKS-1))); do
-        cat $CKPT/eval/vcgbench/answers-temporal/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+        cat $SAVE_DIR/answers-temporal/${CHUNKS}_${IDX}.jsonl >> "$output_file"
     done
 
     # consistency
-    output_file=$CKPT/eval/vcgbench/answers-consistency/merge.jsonl
+    output_file=$SAVE_DIR/answers-consistency/merge.jsonl
     echo $output_file
     > "$output_file"
     for IDX in $(seq 0 $((CHUNKS-1))); do
-        cat $CKPT/eval/vcgbench/answers-consistency/${CHUNKS}_${IDX}.jsonl >> "$output_file"
+        cat $SAVE_DIR/answers-consistency/${CHUNKS}_${IDX}.jsonl >> "$output_file"
     done
 else
-    echo "$CKPT/eval/vcgbench/answers-{generic, temporal, consistency}/merge.jsonl exists!"
+    echo "$SAVE_DIR/answers-{generic, temporal, consistency}/merge.jsonl exists!"
 fi
 
 
 
 echo "Category: Correctness of Information"
 python -m ChatUniVi.eval.evaluate.evaluate_benchmark_1_correctness \
-    --pred_path $CKPT/eval/vcgbench/answers-generic/merge.jsonl \
-    --output_dir $CKPT/eval/vcgbench/correctness \
-    --output_json $CKPT/eval/vcgbench/correctness/merge.jsonl \
+    --pred_path $SAVE_DIR/answers-generic/merge.jsonl \
+    --output_dir $SAVE_DIR/correctness \
+    --output_json $SAVE_DIR/correctness/merge.jsonl \
     --num_tasks $NUM_TASKS_GPT_EVAL
 
 echo "Category: Detail Orientation"
 python -m ChatUniVi.eval.evaluate.evaluate_benchmark_2_detailed_orientation \
-    --pred_path $CKPT/eval/vcgbench/answers-generic/merge.jsonl \
-    --output_dir $CKPT/eval/vcgbench/detailed_orientation \
-    --output_json $CKPT/eval/vcgbench/detailed_orientation/merge.jsonl \
+    --pred_path $SAVE_DIR/answers-generic/merge.jsonl \
+    --output_dir $SAVE_DIR/detailed_orientation \
+    --output_json $SAVE_DIR/detailed_orientation/merge.jsonl \
     --num_tasks $NUM_TASKS_GPT_EVAL
 
 echo "Category: Contextual Understanding"
 python -m ChatUniVi.eval.evaluate.evaluate_benchmark_3_context \
-    --pred_path $CKPT/eval/vcgbench/answers-generic/merge.jsonl \
-    --output_dir $CKPT/eval/vcgbench/context \
-    --output_json $CKPT/eval/vcgbench/context/merge.jsonl \
+    --pred_path $SAVE_DIR/answers-generic/merge.jsonl \
+    --output_dir $SAVE_DIR/context \
+    --output_json $SAVE_DIR/context/merge.jsonl \
     --num_tasks $NUM_TASKS_GPT_EVAL
 
 echo "Category: Temporal Understanding"
 python -m ChatUniVi.eval.evaluate.evaluate_benchmark_4_temporal \
-    --pred_path $CKPT/eval/vcgbench/answers-temporal/merge.jsonl \
-    --output_dir $CKPT/eval/vcgbench/temporal \
-    --output_json $CKPT/eval/vcgbench/temporal/merge.jsonl \
+    --pred_path $SAVE_DIR/answers-temporal/merge.jsonl \
+    --output_dir $SAVE_DIR/temporal \
+    --output_json $SAVE_DIR/temporal/merge.jsonl \
     --num_tasks $NUM_TASKS_GPT_EVAL
 
 echo "Category: Consistency"
 python -m ChatUniVi.eval.evaluate.evaluate_benchmark_5_consistency \
-    --pred_path $CKPT/eval/vcgbench/answers-consistency/merge.jsonl \
-    --output_dir $CKPT/eval/vcgbench/consistency \
-    --output_json $CKPT/eval/vcgbench/consistency/merge.jsonl \
+    --pred_path $SAVE_DIR/answers-consistency/merge.jsonl \
+    --output_dir $SAVE_DIR/consistency \
+    --output_json $SAVE_DIR/consistency/merge.jsonl \
     --num_tasks $NUM_TASKS_GPT_EVAL

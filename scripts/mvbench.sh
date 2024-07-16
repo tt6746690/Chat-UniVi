@@ -8,6 +8,8 @@ trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
 
 
 CKPT=$1
+TOKEN_SCALE=$2
+SAVE_DIR=$3
 CONV_MODE=v1
 
 MAX_IMAGE_LENGTH=64 # default=16 used by mvbench's paper. but I'll keep at 64 since it's the number used for training.
@@ -22,7 +24,7 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --model-path $CKPT \
         --video-folder $EVAL_DATA_DIR/video \
         --question-dir $EVAL_DATA_DIR/json_valid \
-        --output-dir $CKPT/eval/mvbench \
+        --output-dir $SAVE_DIR \
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \
         --temperature 0.0 \
@@ -32,4 +34,4 @@ done
 wait
 
 python -m ChatUniVi.eval.evaluate.evaluate_mvbench \
-    --output-dir $CKPT/eval/mvbench
+    --output-dir $SAVE_DIR
