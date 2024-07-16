@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 from .multimodal_encoder.builder import build_vision_tower
@@ -75,10 +76,11 @@ class MetaModel:
         self.cluster_type = model_config.get('cluster_type', 'v1')
 
         method_name = f"initialize_cluster_modules_{self.cluster_type}"
-        if not getattr(self, method_name):
-            raise ValueError(f"[MetaModel.initialize_cluster_modules] {method_name} not supported.")
+        if getattr(self, method_name, None) is None:
+            print(f"[MetaModel.initialize_cluster_modules] {method_name} not implemented.")
+        else:
+            getattr(self, method_name)(model_config)
 
-        getattr(self, method_name)(model_config)
 
     def initialize_cluster_modules_v1(self, model_config):
         """handles both default model (chatunivi hf ckpt) & modified code with coord_weight. """
@@ -564,7 +566,7 @@ class ChatUniViMetaForCausalLM(ABC):
         return outputs
 
 
-    def project(self, image_features, input_type="image"):
+    def project(self, image_features, input_type="image", matryoshka_vis_token_scale=None):
         """
             call the corresponding `project` function, 
                 e.g., if `self.get_model().cluster_type` is "v1", then calls 
@@ -578,12 +580,18 @@ class ChatUniViMetaForCausalLM(ABC):
             image_token_embeds = self.get_model().mm_projector(image_features)
             token_merging_outputs = None
         else:
-            method_name = f"project_{self.get_model().cluster_type}"
+            cluster_type = self.get_model().cluster_type
+            method_name = f"project_{cluster_type}"
             if not getattr(self, method_name):
                 raise ValueError(f"[ChatUniViMetaForCausalLM.project] {method_name} not supported.")
-
-            if method_name == 'project_v1':
+            if (cluster_type == 'v4' and not matryoshka_vis_token_scale) or (cluster_type != 'v4' and matryoshka_vis_token_scale):
+                raise ValueError('Only use `matryoshka_vis_token_scale` when `cluster_type="v4"`.')
+            
+            if cluster_type == "v1":
                 image_features = getattr(self, method_name)(image_features, input_type=input_type)
+                token_merging_outputs = None
+            elif cluster_type == "v4":
+                image_features = getattr(self, method_name)(image_features, input_type=input_type, matryoshka_vis_token_scale=matryoshka_vis_token_scale)
                 token_merging_outputs = None
             else:
                 token_merging_outputs = getattr(self, method_name)(image_features, input_type=input_type)
@@ -601,6 +609,35 @@ class ChatUniViMetaForCausalLM(ABC):
             "max_positions": positional_encoding_outputs["max_positions"],
         }
         return projection_outputs
+
+    
+    def project_v4(self, image_features, input_type="image", matryoshka_vis_token_scale=None):
+        # wpq todo: add input_type="video"
+
+        if matryoshka_vis_token_scale == '':
+            return image_features
+
+        H = W = int(self.get_model().get_vision_tower().config.image_size / self.get_model().get_vision_tower().config.patch_size)
+
+        from rosemary import parse_kv_from_string
+        kvs = parse_kv_from_string(matryoshka_vis_token_scale)
+
+        if kvs['ver'] == 'v0':
+            numtoks = int(kvs['numtoks'])
+            B, H_W, D = image_features.shape
+            reshaped_tensor = image_features.view(B, H, W, D)
+            # (B, D, H, W)
+            reshaped_tensor = reshaped_tensor.permute(0, 3, 1, 2)
+            pool_size = stride = int( np.sqrt(H_W / numtoks) )
+            # (B, D, 3, 3) if numtoks=9
+            pooled_tensor = torch.nn.functional.avg_pool2d(reshaped_tensor, kernel_size=pool_size, stride=stride)
+            image_features = pooled_tensor.permute(0, 2, 3, 1)
+            # (B, numtoks, D)
+            image_features = image_features.reshape(B, -1, D)
+        else:
+            raise ValueError(f"[ChatUniVi.model.arch] {kvs['ver']} not implemented.")
+
+        return image_features
 
 
     def project_v3(self, image_features, input_type="image"):
@@ -805,7 +842,7 @@ class ChatUniViMetaForCausalLM(ABC):
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
-        self, input_ids, attention_mask, past_key_values, labels, images
+        self, input_ids, attention_mask, past_key_values, labels, images, matryoshka_vis_token_scale=None
     ):
 
         # images: 
@@ -894,7 +931,7 @@ class ChatUniViMetaForCausalLM(ABC):
                     # cur_image_features: [(576, 1024), ..., (576, 1024)]. features for each frame in the video.
                     cur_image_features = torch.stack(cur_image_features, dim=0)
                     # cur_image_features: (#frames, 576, 1024)
-                    projection_outputs = self.project(cur_image_features, input_type="video")
+                    projection_outputs = self.project(cur_image_features, input_type="video", matryoshka_vis_token_scale=matryoshka_vis_token_scale)
                     cur_image_features = projection_outputs["image_token_embeds"]
                     # cur_image_features: (1, 64+32+16, 1024)
                     t, l, n = cur_image_features.size()
@@ -948,7 +985,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 # (B, N, D)
                 cur_image_features = torch.stack(cur_image_features, dim=0)
                 # (B, 64+32+16=112, D)
-                projection_outputs = self.project(cur_image_features, input_type="image")
+                projection_outputs = self.project(cur_image_features, input_type="image", matryoshka_vis_token_scale=matryoshka_vis_token_scale)
                 cur_image_features = projection_outputs["image_token_embeds"]
                 t, l, n = cur_image_features.size()
                 # (B*112, D)
@@ -1132,5 +1169,5 @@ class ChatUniViMetaForCausalLM(ABC):
                 for p in self.get_input_embeddings().parameters():
                     p.requires_grad = False
                 for p in self.get_output_embeddings().parameters():
-                    p.requires_grad = False
+                    p.requires_grad = Fal
                     

@@ -82,6 +82,7 @@ class ModelArguments:
     prune_ratios_video: Optional[List[int]] = field(default=None)
     pe_type: Optional[str] = field(default=None)
     flow: Optional[str] = field(default=None)
+    matryoshka_vis_token_scale: Optional[str] = field(default=None)
 
 
 @dataclass

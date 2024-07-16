@@ -4,6 +4,7 @@ set -e
 set -x
 
 CKPT=$1
+TOKEN_SCALE=$2
 CONV_MODE=v1
 EVAL_DATA_DIR=/fsx/wpq/.data/eval/mm-vet
 
@@ -13,7 +14,8 @@ python -m ChatUniVi.eval.model_vqa \
     --image-folder $EVAL_DATA_DIR/images \
     --answers-file $CKPT/eval/mmvet/answers.jsonl \
     --temperature 0 \
-    --conv-mode $CONV_MODE
+    --conv-mode $CONV_MODE  \
+    --matryoshka_vis_token_scale $TOKEN_SCALE
 
 python -m ChatUniVi.eval.convert_mmvet_for_eval \
     --src $CKPT/eval/mmvet/answers.jsonl \

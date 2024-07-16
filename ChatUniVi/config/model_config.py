@@ -34,6 +34,7 @@ model_config_v0 = {
 
 ## wpq: below are model config.
 
+# original impl
 model_config_v1 = {
     "cluster_type": "v1",
     "use_cluster": True,
@@ -44,7 +45,7 @@ model_config_v1 = {
     "coord_weight": 0,
 }
 
-
+# reimpl: temporal->spatial->video token merging.
 model_config_v2 = {
     "cluster_type": "v2",
     "use_cluster": True,
@@ -60,6 +61,7 @@ model_config_v2 = {
 }
 
 
+# 1 single 3d token merging.
 model_config_v3 = {
     "cluster_type": "v3",
     "use_cluster": True,
@@ -73,3 +75,9 @@ model_config_v3 = {
     "pe_type": None,
 }
 
+
+model_config_v4 = {
+    "cluster_type": "v4",
+    "use_cluster": True,
+    "matryoshka_vis_token_scale": None,
+}

@@ -4,6 +4,7 @@ set -e
 set -x
 
 CKPT=$1
+TOKEN_SCALE=$2
 CONV_MODE=v1
 
 EVAL_DATA_DIR=/fsx/wpq/.data/eval/seed_bench
@@ -21,7 +22,8 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \
         --temperature 0 \
-        --conv-mode $CONV_MODE &
+        --conv-mode $CONV_MODE  \
+        --matryoshka_vis_token_scale $TOKEN_SCALE &
 done
 
 wait

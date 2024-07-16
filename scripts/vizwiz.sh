@@ -3,6 +3,7 @@
 set -e
 
 CKPT=$1
+TOKEN_SCALE=$2
 CONV_MODE=v1
 
 EVAL_DATA_DIR=/fsx/wpq/.data/eval/vizwiz
@@ -13,7 +14,8 @@ python -m ChatUniVi.eval.model_vqa_loader \
     --image-folder $EVAL_DATA_DIR/test \
     --answers-file $CKPT/eval/vizwiz/answers.jsonl \
     --temperature 0 \
-    --conv-mode $CONV_MODE
+    --conv-mode $CONV_MODE  \
+    --matryoshka_vis_token_scale $TOKEN_SCALE
 
 python -m ChatUniVi.eval.convert_vizwiz_for_submission \
     --annotation-file $EVAL_DATA_DIR/llava_test.jsonl \

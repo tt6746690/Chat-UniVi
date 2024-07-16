@@ -4,6 +4,7 @@ set -e
 set -x
 
 CKPT=$1
+TOKEN_SCALE=$2
 CONV_MODE=v1
 
 CHATUNIVI_REPO_DIR=/fsx/wpq/github/metasummer2024/external/Chat-UniVi
@@ -26,7 +27,8 @@ if [[ ! -f "$CKPT/eval/gqa/$SPLIT/answers/merge.jsonl" ]]; then
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0 \
-            --conv-mode $CONV_MODE &
+            --conv-mode $CONV_MODE  \
+            --matryoshka_vis_token_scale $TOKEN_SCALE &
     done
 
     wait

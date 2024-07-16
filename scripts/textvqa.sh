@@ -5,6 +5,7 @@ set -x
 
 
 CKPT=$1
+TOKEN_SCALE=$2
 CONV_MODE=v1
 EVAL_DATA_DIR=/fsx/wpq/.data/eval/textvqa
 
@@ -15,7 +16,8 @@ python -m ChatUniVi.eval.model_vqa_loader \
     --image-folder $EVAL_DATA_DIR/train_images \
     --answers-file $CKPT/eval/textvqa/answers.jsonl \
     --temperature 0 \
-    --conv-mode $CONV_MODE
+    --conv-mode $CONV_MODE \
+    --matryoshka_vis_token_scale $TOKEN_SCALE
 
 python -m ChatUniVi.eval.eval_textvqa \
     --annotation-file $EVAL_DATA_DIR/TextVQA_0.5.1_val.json \

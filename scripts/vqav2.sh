@@ -4,6 +4,7 @@ set -e
 
 
 CKPT=$1
+TOKEN_SCALE=$2
 CONV_MODE=v1
 
 SPLIT="llava_vqav2_mscoco_test-dev2015"
@@ -24,7 +25,8 @@ if [[ ! -f "$CKPT/eval/vqav2/$SPLIT/answers/merge.jsonl" ]]; then
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0 \
-            --conv-mode $CONV_MODE &
+            --conv-mode $CONV_MODE \
+            --matryoshka_vis_token_scale $TOKEN_SCALE &
     done
 
     wait
