@@ -10,6 +10,42 @@ from collections import OrderedDict
 import collections
 from .multimodal_projector.builder import build_vision_projector
 
+try:
+    from rosemary import parse_kv_from_string
+except:
+    pass
+
+
+
+
+class DenseGatingNetwork(torch.nn.Module):
+    """A simple mean-pooling gating network for selecting experts.
+    reference: https://github.com/facebookresearch/fairseq/blob/main/examples/translation_moe/translation_moe_src/mean_pool_gating_network.py
+    """
+
+    def __init__(self, embed_dim, num_experts, dropout=None):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_experts = num_experts
+
+        self.fc1 = torch.nn.Linear(embed_dim, embed_dim)
+        self.dropout = torch.nn.Dropout(dropout) if dropout is not None else None
+        self.fc2 = torch.nn.Linear(embed_dim, num_experts)
+
+    def get_dtype(self):
+        return self.fc1.weight.dtype
+
+    def forward(self, x):
+        # x: (B, D)
+        x = torch.tanh(self.fc1(x))
+        if self.dropout is not None:
+            x = self.dropout(x)
+        x = self.fc2(x)
+        # (B, K) where K is number of experts
+        p = torch.nn.functional.softmax(x, dim=-1, dtype=torch.float32).type_as(x)
+        return p
+    
+
 
 class MetaModel:
     def __init__(self, config):
@@ -137,6 +173,24 @@ class MetaModel:
             prune_ratios=model_config.get('prune_ratios_video', None),
             flow=model_config.get('flow', 'sequential'),
         )
+
+    def initialize_cluster_modules_v4(self, model_config):
+        """ mixture of experts with matryoshka VLM """
+        if model_config.get('matryoshka_vis_token_scale', None) is not None and \
+            model_config.get('moe', None) is not None:
+            kvs = parse_kv_from_string(model_config['moe'])
+            token_scales = eval(parse_kv_from_string(model_config['matryoshka_vis_token_scale'])['numtoks'])
+
+            model_type = kvs['t']
+            if model_type == 'dense':
+                self.router = DenseGatingNetwork(
+                    embed_dim=self.get_vision_tower().config.hidden_size,
+                    num_experts=len(token_scales),
+                    dropout=kvs.get('dropout', None),
+                )
+            else:
+                raise ValueError('model_type={model_type} not impl.')
+
 
 
 def position_encoding_multidim(P, D, div_base=10_000., ordering='interleave'):
@@ -332,11 +386,77 @@ class ChatUniViMetaForCausalLM(ABC):
         pass
 
     def get_vision_tower(self):
-        return self.get_model().get_vision_tower()
+        return self.get_model().get_vision_tower() 
+
+    def encode_images_with_attn(self, images):
+        # images: (B, 3, H, W)
+        vision_tower = self.get_model().get_vision_tower()
+
+        outputs = {}
+        def hook_k(module, input, output):
+            outputs['k'] = output
+
+        def hook_q(module, input, output):
+            outputs['q'] = output
+
+        #set hooks for extracting desired layer's k and q. 23 corresponds to the last layer
+        hook_handle_k = vision_tower.vision_model.encoder.layers[23].self_attn.k_proj.register_forward_hook(hook_k)
+        hook_handle_q = vision_tower.vision_model.encoder.layers[23].self_attn.q_proj.register_forward_hook(hook_q)
+
+        # forward
+        image_forward_outs = vision_tower(
+            images.half().to(device=vision_tower.device, dtype=vision_tower.dtype), 
+            output_hidden_states=True)
+        # (B, 576+1, D)
+        cls_patch = image_forward_outs.hidden_states[self.vision_tower.select_layer]
+        # (B, N, D)
+        patch = cls_patch[:, 1:, :]
+        # (B, D)
+        cls = cls_patch[:, 0, :]
+        # (B, D)
+        patchavgpool = cls_patch[:, 1:, :].mean(1)
+        # (B, D)
+        cls_last = image_forward_outs.hidden_states[-1][:, 0, :]
+        # (B, D)
+        pooled_output = image_forward_outs.pooler_output
+
+        #extract desired layer's k and q and remove hooks; calculate attention
+        k = outputs["k"]
+        q = outputs["q"]
+
+        hook_handle_k.remove()
+        hook_handle_q.remove()
+
+        # (B, N) where N=576
+        D = cls_patch.shape[-1]
+        attn_qk = (q[:, :1, :] @ k[:, 1:, :].transpose(-2, -1)).squeeze(1) * D ** -0.5
+        attn_qk = torch.nn.functional.softmax(attn_qk, dim=-1)
+        attn_kk = (k[:, :1, :] @ k[:, 1:, :].transpose(-2, -1)).squeeze(1) * D ** -0.5
+        attn_kk = torch.nn.functional.softmax(attn_kk, dim=-1)
+
+        return {
+            "patch": patch,
+            "cls": cls,
+            'clslast': cls_last,
+            "patchavgpool": patchavgpool,
+            'poolout': pooled_output,
+            'attnqk': attn_qk,
+            'attnkk': attn_kk,
+        }
+    
+    def encode_images_original(self, images):
+        patch = self.get_model().get_vision_tower()(images, select_feature="patch")
+        return {'patch': patch}
 
     def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images, select_feature="patch")
-        return image_features
+        if self.get_model().use_cluster and \
+            self.get_model().cluster_type == 'v4' and \
+            hasattr(self.get_model().config, 'config') and \
+            self.get_model().config.config.get('matryoshka_vis_token_scale', None) is not None and \
+            self.get_model().config.config.get('moe', None) is not None:
+            return self.encode_images_with_attn(images)
+        else:
+            return self.encode_images_original(images)
 
     # def positional_encoding(self, x, num_features=1024, max_len=64):
     #     p = torch.zeros((1, max_len, num_features))
@@ -354,8 +474,6 @@ class ChatUniViMetaForCausalLM(ABC):
                 image: (B, #tokens, 4096)
                     B=1 for video & arbitrary for image. this function works for both.
         """
-        from rosemary import parse_kv_from_string
-
         B, N, _ = image_token_embeds.shape
         device = image_token_embeds.device
 
@@ -566,7 +684,7 @@ class ChatUniViMetaForCausalLM(ABC):
         return outputs
 
 
-    def project(self, image_features, input_type="image", matryoshka_vis_token_scale=None):
+    def project(self, image_features, input_type="image", matryoshka_vis_token_scale=None, gating_prob=None):
         """
             call the corresponding `project` function, 
                 e.g., if `self.get_model().cluster_type` is "v1", then calls 
@@ -591,7 +709,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 image_features = getattr(self, method_name)(image_features, input_type=input_type)
                 token_merging_outputs = None
             elif cluster_type == "v4":
-                image_features = getattr(self, method_name)(image_features, input_type=input_type, matryoshka_vis_token_scale=matryoshka_vis_token_scale)
+                image_features = getattr(self, method_name)(image_features, input_type=input_type, matryoshka_vis_token_scale=matryoshka_vis_token_scale, gating_prob=gating_prob)
                 token_merging_outputs = None
             else:
                 token_merging_outputs = getattr(self, method_name)(image_features, input_type=input_type)
@@ -611,19 +729,26 @@ class ChatUniViMetaForCausalLM(ABC):
         return projection_outputs
 
     
-    def project_v4(self, image_features, input_type="image", matryoshka_vis_token_scale=None):
+    def project_v4(self, image_features, input_type="image", matryoshka_vis_token_scale=None, gating_prob=None):
         # wpq todo: add input_type="video"
 
         if matryoshka_vis_token_scale == '':
             return image_features
 
         H = W = int(self.get_model().get_vision_tower().config.image_size / self.get_model().get_vision_tower().config.patch_size)
-
-        from rosemary import parse_kv_from_string
         kvs = parse_kv_from_string(matryoshka_vis_token_scale)
 
         if kvs['ver'] == 'v0':
-            numtoks = int(kvs['numtoks'])
+            if kvs['numtoks'] == 'gateprobargmax':
+                if gating_prob is None:
+                    raise ValueError('[project_v4] requires `gating_prob` to select the right token scale for matryoshka_vis_token_scale={matryoshka_vis_token_scale}')
+                if image_features.shape[0] != 1:
+                    raise ValueError('[project_v4] only support batch_size=1 for matryoshka_vis_token_scale={matryoshka_vis_token_scale} but got {image_features.shape[0]}. This is ok since only used during inference.')
+                numtoks_idx = torch.argmax(gating_prob.squeeze(0)).item()
+                token_scales = eval(parse_kv_from_string(self.config.config['matryoshka_vis_token_scale'])['numtoks'])
+                numtoks = token_scales[numtoks_idx]
+            else:
+                numtoks = int(kvs['numtoks'])
             B, H_W, D = image_features.shape
             reshaped_tensor = image_features.view(B, H, W, D)
             # (B, D, H, W)
@@ -849,19 +974,40 @@ class ChatUniViMetaForCausalLM(ABC):
         
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
+            # >1 call to `forward` during inference if use_cache=True
             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
                 attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1), dtype=attention_mask.dtype, device=attention_mask.device)
-            return input_ids, attention_mask, past_key_values, None, labels, None
+            # input_ids, attention_mask, past_key_values, inputs_embeds, labels, position_ids, gating_prob 
+            return input_ids, attention_mask, past_key_values, None, labels, None, None
 
         if type(images) is list or images.ndim == 5: # might is called during generation i think.
             concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images)
+            encode_images_output = self.encode_images(concat_images)
+            image_features = encode_images_output['patch']
             split_sizes = [image.shape[0] for image in images]
             image_features = torch.split(image_features, split_sizes, dim=0)
             image_features = [x.flatten(0, 1) for x in image_features]
         else:
-            image_features = self.encode_images(images)
+            encode_images_output = self.encode_images(images)
+            image_features = encode_images_output['patch']
 
+
+        if self.get_model().use_cluster and \
+            self.get_model().cluster_type == 'v4' and \
+            hasattr(self.get_model().config, 'config') and \
+            self.get_model().config.config.get('matryoshka_vis_token_scale', None) is not None and \
+            self.get_model().config.config.get('moe', None) is not None:
+            kvs = parse_kv_from_string(self.get_model().config.config['moe'])
+            feature_type = kvs['ft']
+            if feature_type in encode_images_output:
+                router_input = encode_images_output[feature_type]
+            else:
+                raise ValueError(f'feature_type={feature_type} cannot be retrieved from `encode_images_output`')
+            # (B, K) float16 -> bfloat16
+            router_input = router_input.to(self.get_model().router.get_dtype())
+            gating_prob = self.get_model().router(router_input)
+        else:
+            gating_prob = None
 
         # print({
         #     'images.shape': images.shape, # (N_1+...+N_B , 3, H, W) where N_1 is 1 if "image" and number of frames if "video".
@@ -931,7 +1077,7 @@ class ChatUniViMetaForCausalLM(ABC):
                     # cur_image_features: [(576, 1024), ..., (576, 1024)]. features for each frame in the video.
                     cur_image_features = torch.stack(cur_image_features, dim=0)
                     # cur_image_features: (#frames, 576, 1024)
-                    projection_outputs = self.project(cur_image_features, input_type="video", matryoshka_vis_token_scale=matryoshka_vis_token_scale)
+                    projection_outputs = self.project(cur_image_features, input_type="video", matryoshka_vis_token_scale=matryoshka_vis_token_scale, gating_prob=gating_prob)
                     cur_image_features = projection_outputs["image_token_embeds"]
                     # cur_image_features: (1, 64+32+16, 1024)
                     t, l, n = cur_image_features.size()
@@ -985,7 +1131,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 # (B, N, D)
                 cur_image_features = torch.stack(cur_image_features, dim=0)
                 # (B, 64+32+16=112, D)
-                projection_outputs = self.project(cur_image_features, input_type="image", matryoshka_vis_token_scale=matryoshka_vis_token_scale)
+                projection_outputs = self.project(cur_image_features, input_type="image", matryoshka_vis_token_scale=matryoshka_vis_token_scale, gating_prob=gating_prob)
                 cur_image_features = projection_outputs["image_token_embeds"]
                 t, l, n = cur_image_features.size()
                 # (B*112, D)
@@ -1124,7 +1270,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 assert(attention_mask.shape == new_input_embeds.shape[:2])
 
 
-        return None, attention_mask, past_key_values, new_input_embeds, new_labels, new_position_ids
+        return None, attention_mask, past_key_values, new_input_embeds, new_labels, new_position_ids, gating_prob
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:
