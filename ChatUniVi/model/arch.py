@@ -183,13 +183,20 @@ class MetaModel:
 
             model_type = kvs['t']
             if model_type == 'dense':
+                feature_type = kvs['ft']
+                if feature_type in ('cls', 'clslast', 'patchavgpool', 'poolout'):
+                    embed_dim = self.get_vision_tower().config.hidden_size
+                elif feature_type in ('attnqk', 'attnkk'):
+                    embed_dim = self.get_vision_tower().num_patches
+                else:
+                    raise ValueError(f"[initialize_cluster_modules_v4] feature_type={feature_type} cannot determine `embed_dim`.")
                 self.router = DenseGatingNetwork(
-                    embed_dim=self.get_vision_tower().config.hidden_size,
+                    embed_dim=embed_dim,
                     num_experts=len(token_scales),
                     dropout=kvs.get('dropout', None),
                 )
             else:
-                raise ValueError('model_type={model_type} not impl.')
+                raise ValueError(f'[initialize_cluster_modules_v4] model_type={model_type} not impl.')
 
 
 
@@ -390,7 +397,7 @@ class ChatUniViMetaForCausalLM(ABC):
 
     def encode_images_with_attn(self, images):
         # images: (B, 3, H, W)
-        vision_tower = self.get_model().get_vision_tower()
+        vision_tower = self.get_model().get_vision_tower().vision_tower
 
         outputs = {}
         def hook_k(module, input, output):
@@ -408,7 +415,7 @@ class ChatUniViMetaForCausalLM(ABC):
             images.half().to(device=vision_tower.device, dtype=vision_tower.dtype), 
             output_hidden_states=True)
         # (B, 576+1, D)
-        cls_patch = image_forward_outs.hidden_states[self.vision_tower.select_layer]
+        cls_patch = image_forward_outs.hidden_states[self.get_model().get_vision_tower().select_layer]
         # (B, N, D)
         patch = cls_patch[:, 1:, :]
         # (B, D)

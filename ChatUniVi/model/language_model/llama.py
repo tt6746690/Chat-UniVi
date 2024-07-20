@@ -82,7 +82,7 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                     # since it only participates in weighting the loss.
                     gating_prob = None 
                 else:
-                    token_scales = [1,9,36,144,576] # hard code for now.
+                    token_scales = eval(parse_kv_from_string(self.model.config.config['matryoshka_vis_token_scale'])['numtoks'])
                     k = token_scales.index(kvs['numtoks'])
                     # (B, K) -> (B,)
                     gating_prob = gating_prob[:, k]
