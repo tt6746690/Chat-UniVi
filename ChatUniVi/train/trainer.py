@@ -3,6 +3,7 @@ import torch
 from transformers import Trainer
 from typing import Optional
 import torch.distributed as dist
+import wandb
 
 try:
     from rosemary import parse_kv_from_string
@@ -135,7 +136,7 @@ class ChatUniViTrainer(Trainer):
                 # gating_prob: (micro-bsz, K) where K is number of experts.
                 gating_prob_idx = 3
                 assert(outputs[gating_prob_idx].shape[1] == 5)
-                if self.is_local_process_zero():
+                if self.is_world_process_zero():
                     gating_prob_list = [torch.zeros_like(outputs[gating_prob_idx]) for _ in range(self.args.world_size)]
                     dist.gather(outputs[gating_prob_idx], gating_prob_list, dst=0)
                     # (B, K)
@@ -149,8 +150,15 @@ class ChatUniViTrainer(Trainer):
                     # scale by world_size since DDP average gradients and `loss_switch` computed on rank=1 process only.
                     loss_switch = self.args.world_size * loss_switch
                     loss += loss_switch
+                    if self.args.report_to == 'wandb': # log once/batch if assume no gradient accumulation.
+                        log_dict = {}
+                        log_dict.update({'moe_load/loss_switch': loss_switch.item(),})
+                        for k in range(K):
+                            log_dict.update({'moe_load/avg_gating_prob_{k}': per_expert_gating_prob[k].item()
+                                             for k in range(K)})
+                        wandb.log(log_dict)
                 else:
-                    dist.gather(outputs[gating_prob_idx], dst=0)
+                    dist.gather(outputs[gating_prob_idx], [], dst=0)
                 
 
         if self.args.n_gpu > 1:
