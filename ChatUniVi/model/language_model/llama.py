@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple, Union
+from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
@@ -7,6 +8,12 @@ from transformers import AutoConfig, AutoModelForCausalLM, \
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from ChatUniVi.model.arch import MetaModel, ChatUniViMetaForCausalLM
+
+
+@dataclass
+class CausalLMOutputWithPastWithGatingProb(CausalLMOutputWithPast):
+    gating_prob: Optional[torch.FloatTensor] = None
+
 
 
 class ChatUniViConfig(LlamaConfig):
@@ -46,7 +53,7 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
         images: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
         matryoshka_vis_token_scale: Optional[str] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> Union[Tuple, CausalLMOutputWithPastWithGatingProb]:
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -80,14 +87,15 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                 if kvs['numtoks'] == 'gateprobargmax':
                     # reached only during inference, and `gating_prob` not useful after this point
                     # since it only participates in weighting the loss.
-                    gating_prob = None 
+                    gating_prob_k = None
                 else:
+                    # reached only during training
                     token_scales = eval(parse_kv_from_string(self.model.config.config['matryoshka_vis_token_scale'])['numtoks'])
                     k = token_scales.index(kvs['numtoks'])
                     # (B, K) -> (B,)
-                    gating_prob = gating_prob[:, k]
+                    gating_prob_k = gating_prob[:, k]
         ####
-            
+
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -96,7 +104,7 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
             # (B, seq_len-1)
             shift_labels = labels[..., 1:].contiguous()
 
-            if gating_prob is None:
+            if gating_prob_k is None:
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss()
                 shift_logits = shift_logits.view(-1, self.config.vocab_size)
@@ -110,7 +118,7 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                 L = logits.shape[1]-1
                 # Enable model/pipeline parallelism
                 shift_labels = shift_labels.to(shift_logits.device)
-                gating_prob = gating_prob.to(shift_logits.device)
+                gating_prob_k = gating_prob_k.to(shift_logits.device)
 
                 losses = loss_fct_noreduce(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
                 # (B, seq_len-1)
@@ -121,21 +129,22 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                 else:
                     loss = torch.tensor(0.0, dtype=shift_logits.dtype, device=shift_logits.device)
                 # (B,)
-                loss = loss * gating_prob.reshape_as(loss)
+                loss = loss * gating_prob_k.reshape_as(loss)
                 # (1,)
                 loss = loss.mean()
 
         if not return_dict:
-            output = (logits,) + outputs[1:]
+            output = (logits,) + outputs[1:] + (gating_prob,)
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return CausalLMOutputWithPastWithGatingProb(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-        ), gating_prob
+            gating_prob=gating_prob,
+        )
 
 
     def forward(
@@ -151,8 +160,8 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
         images: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
         matryoshka_vis_token_scale: Optional[str] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        
+    ) -> Union[Tuple, CausalLMOutputWithPastWithGatingProb]:
+
 
         if self.training and hasattr(self.config, "config") and self.config.config['matryoshka_vis_token_scale'] is not None:
             from rosemary import parse_kv_from_string, create_string_from_kv
@@ -170,8 +179,9 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
             # print("The model is in training mode.")
             loss = 0
             logits_accumulate = []
+            # gating_prob_accumulate = []
             for matryoshka_vis_token_scale_element in matryoshka_vis_token_scale:
-                outputs, gating_prob = self.forward_single_matryoshka(
+                outputs = self.forward_single_matryoshka(
                     input_ids = input_ids,
                     attention_mask = attention_mask,
                     past_key_values = past_key_values,
@@ -186,15 +196,17 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                 )
                 loss_item = outputs.loss
                 logits = outputs.logits
-                if gating_prob is None:
+                if outputs.gating_prob is None:
                     loss += loss_item/len(matryoshka_vis_token_scale)
                 else:
                     loss += loss_item
                 logits_accumulate.append(logits)
+                # gating_prob_accumulate.append(outputs.gating_prob)
                 # wpq: not sure why this is needed:
                 # assert len(outputs) == 1, 'len(outputs) == 1 is False'
             logits = torch.cat(logits_accumulate, dim = 1)
-                    
+            # [(B,), ...] -> (B, K)
+            # gating_prob = torch.stack(gating_prob_accumulate).T
             # wpq: only logits & loss is the avg of the different scales.
             #      `past_key_values`, `hidden_states`, `attentions` are from last scale only.
             #      this is ok since this conditional block is used in training only that just needs `loss`.
@@ -204,17 +216,18 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
             if not return_dict:
                 output = (logits,) + outputs[1:]
                 return (loss,) + output if loss is not None else output
-            return CausalLMOutputWithPast(
+            return CausalLMOutputWithPastWithGatingProb(
                 loss=loss,
                 logits=logits,
                 past_key_values=outputs.past_key_values,
                 hidden_states=outputs.hidden_states,
                 attentions=outputs.attentions,
+                gating_prob=outputs.gating_prob,
             )
             
         else:
             # print("The model is in evaluation mode or trained without matryoshka_vis_token_scale.")
-            outputs, gating_prob = self.forward_single_matryoshka(
+            return self.forward_single_matryoshka(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
@@ -227,7 +240,6 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                 return_dict=return_dict,
                 matryoshka_vis_token_scale=matryoshka_vis_token_scale,
             )
-            return outputs
 
 
     def prepare_inputs_for_generation(

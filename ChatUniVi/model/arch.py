@@ -185,9 +185,11 @@ class MetaModel:
             if model_type == 'dense':
                 feature_type = kvs['ft']
                 if feature_type in ('cls', 'clslast', 'patchavgpool', 'poolout'):
-                    embed_dim = self.get_vision_tower().config.hidden_size
+                    # embed_dim = self.get_vision_tower().config.hidden_size # not yet loaded
+                    embed_dim = self.config.mm_hidden_size
                 elif feature_type in ('attnqk', 'attnkk'):
-                    embed_dim = self.get_vision_tower().num_patches
+                    # embed_dim = self.get_vision_tower().num_patches
+                    embed_dim = 576 # hard code for now.
                 else:
                     raise ValueError(f"[initialize_cluster_modules_v4] feature_type={feature_type} cannot determine `embed_dim`.")
                 self.router = DenseGatingNetwork(
@@ -973,6 +975,25 @@ class ChatUniViMetaForCausalLM(ABC):
 
         return image_features
 
+    def router_forward(self, encode_images_output):
+        if self.get_model().use_cluster and \
+            self.get_model().cluster_type == 'v4' and \
+            hasattr(self.get_model().config, 'config') and \
+            self.get_model().config.config.get('matryoshka_vis_token_scale', None) is not None and \
+            self.get_model().config.config.get('moe', None) is not None:
+            kvs = parse_kv_from_string(self.get_model().config.config['moe'])
+            feature_type = kvs['ft']
+            if feature_type in encode_images_output:
+                router_input = encode_images_output[feature_type]
+            else:
+                raise ValueError(f'feature_type={feature_type} cannot be retrieved from `encode_images_output`')
+            # (B, K) float16 -> bfloat16
+            router_input = router_input.to(self.get_model().router.get_dtype())
+            gating_prob = self.get_model().router(router_input)
+        else:
+            gating_prob = None
+        return gating_prob
+
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, attention_mask, past_key_values, labels, images, matryoshka_vis_token_scale=None
     ):
@@ -998,23 +1019,7 @@ class ChatUniViMetaForCausalLM(ABC):
             encode_images_output = self.encode_images(images)
             image_features = encode_images_output['patch']
 
-
-        if self.get_model().use_cluster and \
-            self.get_model().cluster_type == 'v4' and \
-            hasattr(self.get_model().config, 'config') and \
-            self.get_model().config.config.get('matryoshka_vis_token_scale', None) is not None and \
-            self.get_model().config.config.get('moe', None) is not None:
-            kvs = parse_kv_from_string(self.get_model().config.config['moe'])
-            feature_type = kvs['ft']
-            if feature_type in encode_images_output:
-                router_input = encode_images_output[feature_type]
-            else:
-                raise ValueError(f'feature_type={feature_type} cannot be retrieved from `encode_images_output`')
-            # (B, K) float16 -> bfloat16
-            router_input = router_input.to(self.get_model().router.get_dtype())
-            gating_prob = self.get_model().router(router_input)
-        else:
-            gating_prob = None
+        gating_prob = self.router_forward(encode_images_output)
 
         # print({
         #     'images.shape': images.shape, # (N_1+...+N_B , 3, H, W) where N_1 is 1 if "image" and number of frames if "video".
