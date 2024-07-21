@@ -94,6 +94,8 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                     k = token_scales.index(kvs['numtoks'])
                     # (B, K) -> (B,)
                     gating_prob_k = gating_prob[:, k]
+        else:
+            gating_prob_k = None
         ####
 
         loss = None

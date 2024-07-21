@@ -133,13 +133,12 @@ class ChatUniViTrainer(Trainer):
             ## compute switch transformer load balance loss: https://dl.acm.org/doi/pdf/10.5555/3586589.3586709
             if kvs['loadb'] == 'switch':
                 alpha = float(kvs['alpha'])
-                # gating_prob: (micro-bsz, K) where K is number of experts.
                 gating_prob_idx = 3
                 assert(outputs[gating_prob_idx].shape[1] == 5)
                 if self.is_world_process_zero():
+                    # gather `gating_prob`` (micro-bsz, K) -> (B, K) where K is number of experts.
                     gating_prob_list = [torch.zeros_like(outputs[gating_prob_idx]) for _ in range(self.args.world_size)]
                     dist.gather(outputs[gating_prob_idx], gating_prob_list, dst=0)
-                    # (B, K)
                     gating_prob = torch.cat(gating_prob_list, dim=0)
                     B, K = gating_prob.shape
                     per_expert_assignment = torch.nn.functional.one_hot(gating_prob.argmax(dim=1), num_classes=K)
@@ -147,15 +146,14 @@ class ChatUniViTrainer(Trainer):
                     per_expert_gating_prob = torch.mean(gating_prob, dim=0)
                     # (K,), (K,) -> (,)
                     loss_switch = alpha * K * (per_expert_assignment * per_expert_gating_prob).sum()
-                    # scale by world_size since DDP average gradients and `loss_switch` computed on rank=1 process only.
-                    loss_switch = self.args.world_size * loss_switch
-                    loss += loss_switch
-                    if self.args.report_to == 'wandb': # log once/batch if assume no gradient accumulation.
+                    # scale by world_size since DDP average gradients and `loss_switch` computed on rank=0 process only.
+                    loss += self.args.world_size * loss_switch
+                    if 'wandb' in self.args.report_to: # log once/batch if assume no gradient accumulation.
                         log_dict = {}
                         log_dict.update({'moe_load/loss_switch': loss_switch.item(),})
                         for k in range(K):
-                            log_dict.update({'moe_load/avg_gating_prob_{k}': per_expert_gating_prob[k].item()
-                                             for k in range(K)})
+                            log_dict.update({f'moe_load/avg_gating_prob_{k}': per_expert_gating_prob[k].item()})
+                            log_dict.update({f'moe_load/avg_expert_assignment_{k}': per_expert_assignment[k].item()})
                         wandb.log(log_dict)
                 else:
                     dist.gather(outputs[gating_prob_idx], [], dst=0)
