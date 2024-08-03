@@ -8,7 +8,6 @@ TOKEN_SCALE=$2
 SAVE_DIR=$3
 CONV_MODE=v1
 
-CHATUNIVI_REPO_DIR=/fsx/wpq/github/metasummer2024/external/Chat-UniVi
 SPLIT="llava_gqa_testdev_balanced"
 GQADIR="/fsx/wpq/.data/eval/gqa"
 
@@ -16,6 +15,8 @@ gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 CHUNKS=${#GPULIST[@]}
 
+
+output_file=$SAVE_DIR/$SPLIT/answers/merge.jsonl
 
 if [[ ! -f "$SAVE_DIR/$SPLIT/answers/merge.jsonl" ]]; then
 
@@ -33,8 +34,6 @@ if [[ ! -f "$SAVE_DIR/$SPLIT/answers/merge.jsonl" ]]; then
     done
 
     wait
-
-    output_file=$SAVE_DIR/$SPLIT/answers/merge.jsonl
 
     # Clear out the output file if it exists.
     > "$output_file"

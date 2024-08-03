@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-import math
+import math, re
 import numpy as np
 import torch
 import torch.nn as nn
@@ -15,6 +15,42 @@ try:
 except:
     pass
 
+
+
+
+class AttentionPoolGatingNetwork(nn.Module):
+    """reference: https://github.com/AMLab-Amsterdam/AttentionDeepMIL/blob/master/model.py"""
+    def __init__(self, embed_dim, num_classes):
+        super().__init__()
+        self.attention =  nn.Sequential(
+            nn.Linear(embed_dim, 128),
+            nn.Tanh(),
+            nn.Linear(128, 1),
+        )
+        self.classifier = nn.Linear(embed_dim, num_classes)
+
+    def get_dtype(self):
+        return self.classifier.weight.dtype
+
+    def forward(self, x):
+        """ maps N features to probabilities for `num_classes`
+            `x` (num_frames, D)
+        """
+        # (num_frames, D) -> (B, num_frames, D) where B=1
+        x = x.reshape((1,) + tuple(x.shape))
+        
+        # attention coefficients: (B, num_frames, 1)
+        A = self.attention(x) 
+        A = torch.nn.functional.softmax(A, dim=1)
+
+        # (B, 1, num_frames) @ (B, num_frames, D) -> (B, 1, D) -> (B, D)
+        z = torch.bmm(A.permute(0, 2, 1), x).squeeze(1)
+
+        # (B, K)
+        logits = self.classifier(z)
+        # (B, K) e.g., (1, K)
+        p = torch.nn.functional.softmax(logits, dim=-1, dtype=torch.float32)
+        return p
 
 
 
@@ -42,7 +78,7 @@ class DenseGatingNetwork(torch.nn.Module):
             x = self.dropout(x)
         x = self.fc2(x)
         # (B, K) where K is number of experts
-        p = torch.nn.functional.softmax(x, dim=-1, dtype=torch.float32).type_as(x)
+        p = torch.nn.functional.softmax(x, dim=-1, dtype=torch.float32) # bfloat16 -> float32
         return p
     
 
@@ -176,29 +212,71 @@ class MetaModel:
 
     def initialize_cluster_modules_v4(self, model_config):
         """ mixture of experts with matryoshka VLM """
-        if model_config.get('matryoshka_vis_token_scale', None) is not None and \
-            model_config.get('moe', None) is not None:
+        if self.is_m3_moe:
             kvs = parse_kv_from_string(model_config['moe'])
-            token_scales = eval(parse_kv_from_string(model_config['matryoshka_vis_token_scale'])['numtoks'])
 
             model_type = kvs['t']
             if model_type == 'dense':
-                feature_type = kvs['ft']
-                if feature_type in ('cls', 'clslast', 'patchavgpool', 'poolout'):
-                    # embed_dim = self.get_vision_tower().config.hidden_size # not yet loaded
-                    embed_dim = self.config.mm_hidden_size
-                elif feature_type in ('attnqk', 'attnkk'):
-                    # embed_dim = self.get_vision_tower().num_patches
-                    embed_dim = 576 # hard code for now.
+                feature_types = str(kvs['ft']).split(',')
+                embed_dim = 0
+                if any(x in feature_types for x in ('cls', 'clslast', 'patchavgpool', 'poolout')):
+                    embed_dim += self.config.mm_hidden_size
+                elif any(x in feature_types for x in ('attnqk', 'attnkk')):
+                    embed_dim += 576 # hard code for now.
                 else:
-                    raise ValueError(f"[initialize_cluster_modules_v4] feature_type={feature_type} cannot determine `embed_dim`.")
+                    raise ValueError(f"[initialize_additional_modules_v4] feature_types={feature_types} cannot determine `embed_dim`.")
                 self.router = DenseGatingNetwork(
                     embed_dim=embed_dim,
-                    num_experts=len(token_scales),
+                    num_experts=len(self.tokscale_list),
                     dropout=kvs.get('dropout', None),
                 )
+            elif model_type == 'milpool':
+                feature_types = str(kvs['ft']).split(',')
+                embed_dim = 0
+                if any(x in feature_types for x in ('cls', 'clslast', 'patchavgpool', 'poolout')):
+                    embed_dim += self.config.mm_hidden_size
+                elif any(x in feature_types for x in ('attnqk', 'attnkk')):
+                    embed_dim += 576 # hard code for now.
+                else:
+                    raise ValueError(f"[initialize_additional_modules_v4] feature_types={feature_types} cannot determine `embed_dim`.")
+                self.router = AttentionPoolGatingNetwork(
+                    embed_dim=embed_dim,
+                    num_classes=len(self.eventscale_list),
+                )
             else:
-                raise ValueError(f'[initialize_cluster_modules_v4] model_type={model_type} not impl.')
+                raise ValueError(f'[initialize_additional_modules_v4] model_type={model_type} not impl.')
+
+    @property
+    def tokscale_list(self):
+        return eval(parse_kv_from_string(self.config.config['matryoshka_vis_token_scale'])['numtoks']) \
+            if self.is_m3_moe else []
+
+    @property
+    def eventscale_list(self):
+        return eval(parse_kv_from_string(self.config.config['matryoshka_vis_token_scale'])['numevents']) \
+            if self.is_m3_moe else []
+
+    @property
+    def m3_version(self):
+        return parse_kv_from_string(self.config.config['matryoshka_vis_token_scale'])['ver'] \
+            if self.is_m3_moe else None
+
+    @property
+    def is_m3(self):
+        return self.use_cluster and \
+            self.cluster_type == 'v4' and \
+            hasattr(self.config, 'config') and \
+            self.config.config.get('matryoshka_vis_token_scale', None) is not None
+
+    @property
+    def is_m3_moe(self):
+        return self.is_m3 and self.config.config.get('moe', None) is not None
+
+    def get_router(self):
+        router = getattr(self, 'router', None)
+        if type(router) is list:
+            router = router[0]
+        return router
 
 
 
@@ -388,6 +466,26 @@ def treat_z_as_event_id(token_merging_outputs, T, config):
     return token_merging_outputs, T
 
 
+def adaptive_avg_pool(image_features, numtoks):
+    """Spatial adaptive avg pool to `numtoks` tokens.
+        `image_features`    (B, N, D) -> (B, numtoks, D)
+    """
+    B, H_W, D = image_features.shape
+    H = W = int( math.sqrt(H_W) )
+    reshaped_tensor = image_features.view(B, H, W, D)
+    # (B, D, H, W) e.g., (B, 4096, 24, 24)
+    reshaped_tensor = reshaped_tensor.permute(0, 3, 1, 2)
+    h = w = int( math.sqrt(numtoks) )
+    assert(h*w == numtoks)
+    # (B, D, h, w)
+    pooled_tensor = torch.nn.functional.adaptive_avg_pool2d(reshaped_tensor, (h, w))
+    # (B, h, w, D)
+    image_features = pooled_tensor.permute(0, 2, 3, 1)
+    # (B, numtoks, D)
+    image_features = image_features.reshape(B, -1, D)
+    return image_features
+
+
 
 class ChatUniViMetaForCausalLM(ABC):
     @abstractmethod
@@ -396,6 +494,9 @@ class ChatUniViMetaForCausalLM(ABC):
 
     def get_vision_tower(self):
         return self.get_model().get_vision_tower() 
+
+    def get_router(self):
+        return self.get_model().get_router()
 
     def encode_images_with_attn(self, images):
         # images: (B, 3, H, W)
@@ -458,24 +559,10 @@ class ChatUniViMetaForCausalLM(ABC):
         return {'patch': patch}
 
     def encode_images(self, images):
-        if self.get_model().use_cluster and \
-            self.get_model().cluster_type == 'v4' and \
-            hasattr(self.get_model().config, 'config') and \
-            self.get_model().config.config.get('matryoshka_vis_token_scale', None) is not None and \
-            self.get_model().config.config.get('moe', None) is not None:
+        if self.get_model().is_m3:
             return self.encode_images_with_attn(images)
         else:
             return self.encode_images_original(images)
-
-    # def positional_encoding(self, x, num_features=1024, max_len=64):
-    #     p = torch.zeros((1, max_len, num_features))
-    #     _x = torch.arange(max_len, dtype=torch.float32).reshape(-1, 1) / torch.pow(10000,
-    #                                                                         torch.arange(0, num_features, 2, dtype=torch.float32) / num_features)
-
-    #     p[:, :, 0::2] = torch.sin(_x)
-    #     p[:, :, 1::2] = torch.cos(_x)
-    #     x = x + p[:, :x.shape[1], :].to(x.device).to(x.dtype)
-    #     return x
 
     def positional_encoding(self, image_token_embeds, token_merging_outputs, input_type):
         """
@@ -741,35 +828,62 @@ class ChatUniViMetaForCausalLM(ABC):
     def project_v4(self, image_features, input_type="image", matryoshka_vis_token_scale=None, gating_prob=None):
         # wpq todo: add input_type="video"
 
+        # image_features
+        # image: (1, N, D)
+        # video: (#frames, N, D) e.g. (64, 576, 1024)
+        B, N, D = image_features.shape
+    
         if matryoshka_vis_token_scale == '':
             return image_features
 
         H = W = int(self.get_model().get_vision_tower().config.image_size / self.get_model().get_vision_tower().config.patch_size)
         kvs = parse_kv_from_string(matryoshka_vis_token_scale)
 
-        if kvs['ver'] == 'v0':
+        if kvs['ver'] == 'v0':  # image only, do avg pooling on vit features.
             if kvs['numtoks'] == 'gateprobargmax':
                 if gating_prob is None:
-                    raise ValueError('[project_v4] requires `gating_prob` to select the right token scale for matryoshka_vis_token_scale={matryoshka_vis_token_scale}')
-                if image_features.shape[0] != 1:
-                    raise ValueError('[project_v4] only support batch_size=1 for matryoshka_vis_token_scale={matryoshka_vis_token_scale} but got {image_features.shape[0]}. This is ok since only used during inference.')
+                    raise ValueError(f'[LlavaMetaForCausalLM.project_v4] requires `gating_prob` to select the right token scale for matryoshka_vis_token_scale={matryoshka_vis_token_scale}')
+                if B != 1:
+                    raise ValueError(f'[LlavaMetaForCausalLM.project_v4] only support batch_size=1 for matryoshka_vis_token_scale={matryoshka_vis_token_scale} but got {B}. This is ok since only used during inference.')
                 numtoks_idx = torch.argmax(gating_prob.squeeze(0)).item()
-                token_scales = eval(parse_kv_from_string(self.config.config['matryoshka_vis_token_scale'])['numtoks'])
-                numtoks = token_scales[numtoks_idx]
+                numtoks = self.get_model().tokscale_list[numtoks_idx]
             else:
                 numtoks = int(kvs['numtoks'])
-            B, H_W, D = image_features.shape
-            reshaped_tensor = image_features.view(B, H, W, D)
-            # (B, D, H, W)
-            reshaped_tensor = reshaped_tensor.permute(0, 3, 1, 2)
-            pool_size = stride = int( np.sqrt(H_W / numtoks) )
-            # (B, D, 3, 3) if numtoks=9
-            pooled_tensor = torch.nn.functional.avg_pool2d(reshaped_tensor, kernel_size=pool_size, stride=stride)
-            image_features = pooled_tensor.permute(0, 2, 3, 1)
-            # (B, numtoks, D)
-            image_features = image_features.reshape(B, -1, D)
+            if input_type == "image":
+                image_features = adaptive_avg_pool(image_features, numtoks)
+            elif input_type == "video":
+                raise ValueError(f'matryoshka_vis_token_scale = {matryoshka_vis_token_scale} does not support video input.')
+        elif kvs['ver'] == 'v1': # video selects number of events
+            if kvs['numevents'] == 'gateprobargmax':
+                if gating_prob is None:
+                    raise ValueError(f'[LlavaMetaForCausalLM.project_v4] requires `gating_prob` to select the right token scale for matryoshka_vis_token_scale={matryoshka_vis_token_scale}')
+                if B != 1:
+                    raise ValueError(f'[LlavaMetaForCausalLM.project_v4] only support batch_size=1 for matryoshka_vis_token_scale={matryoshka_vis_token_scale} but got {B}. This is ok since only used during inference.')
+                numevents_idx = torch.argmax(gating_prob.squeeze(0)).item()
+                numevents = self.get_model().eventscale_list[numevents_idx]
+            else:
+                numevents = int(kvs['numevents'])
+            numtoks = int(kvs['numtoks'])
+
+            if input_type == "image":
+                image_features = adaptive_avg_pool(image_features, numtoks)
+            elif input_type == "video":
+                # if video with N frames, then
+                # numevents, frame_ids
+                # 1          [0]
+                # 2          [0, N-1]
+                # 3          [0, (N-1)//2, N-1]
+                # if N < numevents, then repeat first frame a few times to reach numvents
+                # 4          [0, 0, 0, 1]
+                frame_ids = torch.linspace(0, B-1, numevents, dtype=torch.long, device=image_features.device)
+                # (numevents, N, D) e.g., (4, 576, 1024)
+                image_features = image_features[frame_ids]
+                # (numevents, numtoks, D) e.g., (4, 144, 1024)
+                image_features = adaptive_avg_pool(image_features, numtoks)
+                # (1, numevents*numtoks, D), e.g., (1, 576, 1024)
+                image_features = image_features.reshape(1, -1, D)
         else:
-            raise ValueError(f"[ChatUniVi.model.arch] {kvs['ver']} not implemented.")
+            raise ValueError(f"[LlavaMetaForCausalLM.project_v4] {kvs['ver']} not implemented.")
 
         return image_features
 
@@ -975,20 +1089,21 @@ class ChatUniViMetaForCausalLM(ABC):
 
         return image_features
 
-    def router_forward(self, encode_images_output):
-        if self.get_model().use_cluster and \
-            self.get_model().cluster_type == 'v4' and \
-            hasattr(self.get_model().config, 'config') and \
-            self.get_model().config.config.get('matryoshka_vis_token_scale', None) is not None and \
-            self.get_model().config.config.get('moe', None) is not None:
+    def router_forward(self, encode_images_output, batch_idx_list=[], input_ids=None):
+        if self.get_model().is_m3_moe:
             kvs = parse_kv_from_string(self.get_model().config.config['moe'])
             feature_type = kvs['ft']
             if feature_type in encode_images_output:
                 router_input = encode_images_output[feature_type]
             else:
                 raise ValueError(f'feature_type={feature_type} cannot be retrieved from `encode_images_output`')
+            # (B, D) -> (num_frames, D) where |batch-idx-list| is num_frames.
+            if batch_idx_list:
+                router_input = router_input[batch_idx_list]
             # (B, K) float16 -> bfloat16
             router_input = router_input.to(self.get_model().router.get_dtype())
+            # image: (B, D) -> (B, K)
+            # video: (B, D) -> (1, K)
             gating_prob = self.get_model().router(router_input)
         else:
             gating_prob = None
@@ -1019,7 +1134,6 @@ class ChatUniViMetaForCausalLM(ABC):
             encode_images_output = self.encode_images(images)
             image_features = encode_images_output['patch']
 
-        gating_prob = self.router_forward(encode_images_output)
 
         # print({
         #     'images.shape': images.shape, # (N_1+...+N_B , 3, H, W) where N_1 is 1 if "image" and number of frames if "video".
@@ -1030,7 +1144,7 @@ class ChatUniViMetaForCausalLM(ABC):
         #  '#images / example in batch': [23, 1, 14], 
         #  'image_features.shape': torch.Size([38, 576, 1024])}
 
-
+        gating_prob_list = []
         new_position_ids = []
         new_input_embeds = []
         new_labels = [] if labels is not None else None
@@ -1081,11 +1195,15 @@ class ChatUniViMetaForCausalLM(ABC):
                     image_token_start = image_token_indices[0] # tensor(35, device='cuda:0')
                     image_token_end = image_token_indices[-1]  # tensor(57, device='cuda:0')
                     cur_image_features = []
+                    batch_idx_list = []
 
                     for _ in i:
                         cur_image_features.append(image_features[cur_image_idx])
+                        batch_idx_list.append(cur_image_idx)
                         cur_image_idx += 1
 
+                    # (1, K)
+                    gating_prob = self.router_forward(encode_images_output, batch_idx_list=batch_idx_list, input_ids=input_ids)
                     # cur_image_features: [(576, 1024), ..., (576, 1024)]. features for each frame in the video.
                     cur_image_features = torch.stack(cur_image_features, dim=0)
                     # cur_image_features: (#frames, 576, 1024)
@@ -1135,11 +1253,15 @@ class ChatUniViMetaForCausalLM(ABC):
                 cur_image_features = []
                 image_token_start = image_token_indices[0]
                 image_token_end = image_token_indices[-1]
+                batch_idx_list = []
 
                 for _ in image_token_indices:
                     cur_image_features.append(image_features[cur_image_idx])
+                    batch_idx_list.append(cur_image_idx)
                     cur_image_idx += 1
 
+                # (1, K)
+                gating_prob = self.router_forward(encode_images_output, batch_idx_list=batch_idx_list, input_ids=input_ids)
                 # (B, N, D)
                 cur_image_features = torch.stack(cur_image_features, dim=0)
                 # (B, 64+32+16=112, D)
@@ -1182,6 +1304,8 @@ class ChatUniViMetaForCausalLM(ABC):
                 else:
                     # this branch since `tune_mm_mlp_adapter` typically set to False
                     cur_input_ids = cur_input_ids[image_token_end+1:]
+
+            gating_prob_list.append(gating_prob)
 
             ## shared by both image & video to append the latter part of the input_ids/labels.
             if cur_input_ids.numel() > 0:
@@ -1281,6 +1405,8 @@ class ChatUniViMetaForCausalLM(ABC):
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
                 assert(attention_mask.shape == new_input_embeds.shape[:2])
 
+        # [(1, K), ...] -> (B, K)
+        gating_prob = torch.cat(gating_prob_list, dim=0)
 
         return None, attention_mask, past_key_values, new_input_embeds, new_labels, new_position_ids, gating_prob
 

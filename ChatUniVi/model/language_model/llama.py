@@ -8,10 +8,119 @@ from transformers import AutoConfig, AutoModelForCausalLM, \
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from ChatUniVi.model.arch import MetaModel, ChatUniViMetaForCausalLM
+try:
+    from rosemary import parse_kv_from_string, create_string_from_kv
+except:
+    pass
+
+
+
+def lm_loss(logits, labels, lm_loss_type='micro'):
+    """Compute LM loss.
+        default huggingface's implementation uses `micro` average.
+    """
+    vocab_size = logits.shape[-1]
+    # typical LM loss
+    loss = None
+    if labels is not None:
+        # Shift so that tokens < n predict n
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        if lm_loss_type == 'micro':
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+        elif lm_loss_type == 'macro':
+            loss_fct_noreduce = CrossEntropyLoss(reduction='none')
+            shift_labels = shift_labels.to(shift_logits.device)
+            losses = loss_fct_noreduce(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
+            losses = losses.view(-1, shift_labels.shape[-1])
+            valid_mask = (shift_labels != -100)
+            # (B,)
+            loss = (losses * valid_mask).sum(1) / (valid_mask.sum(1) + 1e-8)
+            # (1,)
+            loss = loss.mean()
+        else:
+            raise ValueError(f'invalid lm_loss_type = {lm_loss_type}')
+
+    return loss
+
+
+def lm_loss_weighted(logits, labels, sample_weights, lm_loss_type='micro'):
+    """Compute LM loss weighted by `sample_weights`.
+        `sample_weights`    (B,)
+    """
+    vocab_size = logits.shape[-1]
+    # LM loss weighted by gating prob
+    loss = None
+    if labels is not None:
+        # Shift so that tokens < n predict n
+        # (B, seq_len-1, vocab_size)
+        shift_logits = logits[..., :-1, :].contiguous()
+        # (B, seq_len-1)
+        shift_labels = labels[..., 1:].contiguous()
+        # Flatten the tokens
+        loss_fct_noreduce = CrossEntropyLoss(reduction='none')
+        # Enable model/pipeline parallelism
+        shift_labels = shift_labels.to(shift_logits.device)
+        sample_weights = sample_weights.to(shift_logits.device)
+        losses = loss_fct_noreduce(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
+        # (B, seq_len-1)
+        losses = losses.view(-1, logits.shape[1]-1)
+        valid_mask = (shift_labels != -100)
+        
+        if lm_loss_type == 'micro':
+            loss = (losses * valid_mask).sum(1)
+            # (B,)
+            loss = loss * sample_weights.reshape_as(loss)
+            # (1,)
+            loss = loss.sum() / (valid_mask.sum() + 1e-8)
+        elif lm_loss_type == 'macro':
+            loss = (losses * valid_mask).sum(1) / (valid_mask.sum(1) + 1e-8)
+            # (B,)
+            loss = loss * sample_weights.reshape_as(loss)
+            # (1,)
+            loss = loss.mean()
+        else:
+            raise ValueError(f'invalid lm_loss_type = {lm_loss_type}')
+    return loss
+
+
+def lm_loss_unreduced(logits, labels, lm_loss_type='micro'):
+    """Compute LM loss in unreduced form such that 
+        when taking mean, equal in value to reduced loss.
+    """
+    vocab_size = logits.shape[-1]
+    # typical LM loss
+    loss = None
+    if labels is not None:
+        # Shift so that tokens < n predict n
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        loss_fct_noreduce = CrossEntropyLoss(reduction='none')
+        shift_labels = shift_labels.to(shift_logits.device)
+        losses = loss_fct_noreduce(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
+        losses = losses.view(-1, shift_labels.shape[-1])
+        valid_mask = (shift_labels != -100)
+        if lm_loss_type == 'micro':
+            loss = (losses * valid_mask).sum(1)
+            loss = loss * loss.shape[0] / (valid_mask.sum() + 1e-8)
+        elif lm_loss_type == 'macro':
+            loss = (losses * valid_mask).sum(1) / (valid_mask.sum(1) + 1e-8)
+        else:
+            raise ValueError(f'invalid lm_loss_type = {lm_loss_type}')
+
+    return loss
 
 
 @dataclass
 class CausalLMOutputWithPastWithGatingProb(CausalLMOutputWithPast):
+    losses: Optional[torch.FloatTensor] = None
+    losses_lm: Optional[torch.FloatTensor] = None
     gating_prob: Optional[torch.FloatTensor] = None
 
 
@@ -81,7 +190,6 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
 
         #### wpq: 
         if gating_prob is not None:
-            from rosemary import parse_kv_from_string
             kvs = parse_kv_from_string(matryoshka_vis_token_scale)
             if kvs['ver'] == 'v0':
                 if kvs['numtoks'] == 'gateprobargmax':
@@ -90,53 +198,34 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                     gating_prob_k = None
                 else:
                     # reached only during training
-                    token_scales = eval(parse_kv_from_string(self.model.config.config['matryoshka_vis_token_scale'])['numtoks'])
-                    k = token_scales.index(kvs['numtoks'])
+                    tokscale_list = self.get_model().tokscale_list
+                    k = tokscale_list.index(kvs['numtoks'])
+                    # (B, K) -> (B,)
+                    gating_prob_k = gating_prob[:, k]
+            elif kvs['ver'] == 'v1':
+                if kvs['numevents'] == 'gateprobargmax':
+                    gating_prob_k = None
+                else:
+                    # reached only during training
+                    eventscale_list = self.get_model().eventscale_list
+                    k = eventscale_list.index(kvs['numevents'])
                     # (B, K) -> (B,)
                     gating_prob_k = gating_prob[:, k]
         else:
             gating_prob_k = None
         ####
 
-        loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            # (B, seq_len-1, vocab_size)
-            shift_logits = logits[..., :-1, :].contiguous()
-            # (B, seq_len-1)
-            shift_labels = labels[..., 1:].contiguous()
+        lm_loss_type = self.get_model().config.config.get('lm_loss_type', 'micro')
 
-            if gating_prob_k is None:
-                # Flatten the tokens
-                loss_fct = CrossEntropyLoss()
-                shift_logits = shift_logits.view(-1, self.config.vocab_size)
-                shift_labels = shift_labels.view(-1)
-                # Enable model/pipeline parallelism
-                shift_labels = shift_labels.to(shift_logits.device)
-                loss = loss_fct(shift_logits, shift_labels)
-            else:
-                # Flatten the tokens
-                loss_fct_noreduce = CrossEntropyLoss(reduction='none')
-                L = logits.shape[1]-1
-                # Enable model/pipeline parallelism
-                shift_labels = shift_labels.to(shift_logits.device)
-                gating_prob_k = gating_prob_k.to(shift_logits.device)
+        loss_lm = lm_loss_unreduced(logits, labels, lm_loss_type)
+        if gating_prob_k is not None:
+            loss = lm_loss_weighted(logits, labels, gating_prob_k, lm_loss_type)
+        else:
+            loss = lm_loss(logits, labels, lm_loss_type)
 
-                losses = loss_fct_noreduce(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
-                # (B, seq_len-1)
-                losses = losses.view(-1, L)
-                valid_mask = (shift_labels != -100)
-                if valid_mask.any():
-                    loss = (losses * valid_mask).sum(1) / valid_mask.sum(1)
-                else:
-                    loss = torch.tensor(0.0, dtype=shift_logits.dtype, device=shift_logits.device)
-                # (B,)
-                loss = loss * gating_prob_k.reshape_as(loss)
-                # (1,)
-                loss = loss.mean()
 
         if not return_dict:
-            output = (logits,) + outputs[1:] + (gating_prob,)
+            output = (logits,) + outputs[1:] + (None, loss_lm, gating_prob,)
             return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPastWithGatingProb(
@@ -145,6 +234,8 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            losses=None,
+            losses_lm=loss_lm,
             gating_prob=gating_prob,
         )
 
@@ -165,23 +256,35 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
     ) -> Union[Tuple, CausalLMOutputWithPastWithGatingProb]:
 
 
-        if self.training and hasattr(self.config, "config") and self.config.config['matryoshka_vis_token_scale'] is not None:
-            from rosemary import parse_kv_from_string, create_string_from_kv
+        if self.training and self.get_model().is_m3:
             matryoshka_vis_token_scale = self.config.config['matryoshka_vis_token_scale']
             kvs = parse_kv_from_string(matryoshka_vis_token_scale)
+
             if kvs['ver'] == 'v0':
+                # 'ver=v0_numtoks=[144,576]' -> ['ver=v0_numtoks=144', 'ver=v0_numtoks=576']
                 num_toks = eval(kvs['numtoks']) # str -> List
                 matryoshka_vis_token_scale = []
                 for num_tok in num_toks:
                     kvs['numtoks'] = str(num_tok)
+                    matryoshka_vis_token_scale.append( create_string_from_kv(kvs) )
+            elif kvs['ver'] == 'v1':
+                # 'ver=v1_numtoks=[144]_numevents=[1,4]' -> ['ver=v1_numtoks=144_numevents=1', 'ver=v1_numtoks=144_numevents=4']
+                num_toks = eval(kvs['numtoks'])
+                assert(len(num_toks) == 1)
+                num_events = eval(kvs['numevents'])
+                matryoshka_vis_token_scale = []
+                for num_event in num_events:
+                    kvs['numevents'] = str(num_event)
+                    kvs['numtoks'] = str(num_toks[0])
                     matryoshka_vis_token_scale.append( create_string_from_kv(kvs) )
             else:
                 raise ValueError(f"[ChatUniVi.model.language_model.llama.py] {kvs['ver']} not implemented.")
 
             # print("The model is in training mode.")
             loss = 0
+            losses_accumulate = [] # can be weighted or not.
+            losses_lm_accumulate = [] # unweighted lm loss
             logits_accumulate = []
-            # gating_prob_accumulate = []
             for matryoshka_vis_token_scale_element in matryoshka_vis_token_scale:
                 outputs = self.forward_single_matryoshka(
                     input_ids = input_ids,
@@ -197,16 +300,18 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                     matryoshka_vis_token_scale= matryoshka_vis_token_scale_element
                 )
                 loss_item = outputs.loss
+                loss_lm_term = outputs.losses_lm
                 logits = outputs.logits
                 if outputs.gating_prob is None:
-                    loss += loss_item/len(matryoshka_vis_token_scale)
-                else:
-                    loss += loss_item
+                    loss_item = loss_item/len(matryoshka_vis_token_scale)
+                    loss_lm_term = loss_lm_term/len(matryoshka_vis_token_scale)
+                losses_accumulate.append(loss_item)
+                losses_lm_accumulate.append(loss_lm_term)
                 logits_accumulate.append(logits)
-                # gating_prob_accumulate.append(outputs.gating_prob)
-                # wpq: not sure why this is needed:
-                # assert len(outputs) == 1, 'len(outputs) == 1 is False'
             logits = torch.cat(logits_accumulate, dim = 1)
+            losses = torch.stack(losses_accumulate)
+            losses_lm = torch.stack(losses_lm_accumulate).T # (B, K)
+            loss = losses.sum()
             # [(B,), ...] -> (B, K)
             # gating_prob = torch.stack(gating_prob_accumulate).T
             # wpq: only logits & loss is the avg of the different scales.
@@ -216,7 +321,7 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
             # loss:   (1,)                     ->  (1,)             
             # logits: (B, seq_len, vocab_size) ->  (B, seq_len_1+...+seq_len_K, vocab_size) where K=#token scales
             if not return_dict:
-                output = (logits,) + outputs[1:]
+                output = (logits,) + outputs[1:] + (losses, losses_lm, outputs.gating_prob)
                 return (loss,) + output if loss is not None else output
             return CausalLMOutputWithPastWithGatingProb(
                 loss=loss,
@@ -224,6 +329,8 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                 past_key_values=outputs.past_key_values,
                 hidden_states=outputs.hidden_states,
                 attentions=outputs.attentions,
+                losses=losses,
+                losses_lm=losses_lm,
                 gating_prob=outputs.gating_prob,
             )
             
