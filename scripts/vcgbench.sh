@@ -35,7 +35,8 @@ if [[ ! -f "$SAVE_DIR/answers-generic/merge.jsonl" ]]; then
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0.2 \
-            --conv-mode $CONV_MODE &
+            --conv-mode $CONV_MODE \
+            $(if [ -n "$TOKEN_SCALE" ]; then echo "--matryoshka_vis_token_scale $TOKEN_SCALE"; fi) &
     done
     wait
     output_file=$SAVE_DIR/answers-generic/merge.jsonl
@@ -58,7 +59,8 @@ if [[ ! -f "$SAVE_DIR/answers-temporal/merge.jsonl" ]]; then
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0.2 \
-            --conv-mode $CONV_MODE &
+            --conv-mode $CONV_MODE \
+            $(if [ -n "$TOKEN_SCALE" ]; then echo "--matryoshka_vis_token_scale $TOKEN_SCALE"; fi) &
     done
     wait
     output_file=$SAVE_DIR/answers-temporal/merge.jsonl
@@ -81,7 +83,8 @@ if [[ ! -f "$SAVE_DIR/answers-consistency/merge.jsonl" ]]; then
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0.2 \
-            --conv-mode $CONV_MODE &
+            --conv-mode $CONV_MODE \
+            $(if [ -n "$TOKEN_SCALE" ]; then echo "--matryoshka_vis_token_scale $TOKEN_SCALE"; fi) &
     done
     wait
     output_file=$SAVE_DIR/answers-consistency/merge.jsonl

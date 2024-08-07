@@ -109,6 +109,30 @@ def index_points(points, idx):
     return new_points
 
 
+
+def torch_cdist_weighted(X, W=None):
+    """Given `X` size (B, N, D) and weights `W` (D,)
+        Compute distance matrix `dist` where dist_ij = Σd Wd (X_id-X_jd)^2    
+    """
+    if X.ndim != 3:
+        raise ValueError(f'X dims: (B, N, D) but got {X.shape}')
+    
+    D = X.shape[-1]
+    if isinstance(W, (int,float)) or len(W) == 1:
+        W = torch.tensor(W, dtype=X.dtype, device=X.device)
+        W.reshape(1,).repeat(D)
+    else:
+        W = torch.tensor(W, dtype=X.dtype, device=X.device)
+        
+    X_i = X.unsqueeze(2) # (B, N, 1, D)
+    X_j = X.unsqueeze(1) # (B, 1, N, D)
+    # (B, N, N, D)
+    dist = W * (X_i - X_j)**2
+    # (B, N, N)
+    dist = dist.sum(dim=-1)
+    return dist
+
+
 def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None, token_coord=None, coord_weight=0):
     """Cluster tokens with DPC-KNN algorithm.
     Return:
@@ -139,10 +163,17 @@ def cluster_dpc_knn(token_dict, cluster_num, k=5, token_mask=None, token_coord=N
                           (dist_matrix.max() + 1) * (~token_mask[:, None, :])
         
         # wpq: distance in xy coordinate space to encourage merging of nearby tokens.
-        if token_coord is not None and coord_weight > 0:
-            coord_dim = token_coord.shape[-1]
-            dist_matrix_coord = torch.cdist(token_coord.float(), token_coord.float()) / math.sqrt(coord_dim)
-            dist_matrix = dist_matrix * torch.exp(coord_weight*dist_matrix_coord)
+        if token_coord is not None and coord_weight:
+            if isinstance(coord_weight, (int, float)):
+                # order implementation
+                coord_dim = token_coord.shape[-1]
+                dist_matrix_coord = torch.cdist(token_coord.float(), token_coord.float()) / math.sqrt(coord_dim)
+                dist_matrix = dist_matrix * torch.exp(coord_weight*dist_matrix_coord)
+            else:
+                # coordinate weighted implementation
+                dist_matrix_coord = torch_cdist_weighted(token_coord, coord_weight)
+                dist_matrix_coord = torch.exp(dist_matrix_coord)
+                dist_matrix = dist_matrix * dist_matrix_coord
 
         # get local density
 

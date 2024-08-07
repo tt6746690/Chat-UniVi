@@ -28,7 +28,8 @@ for IDX in $(seq 0 $((CHUNKS-1))); do
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \
         --temperature 0.0 \
-        --conv-mode $CONV_MODE &
+        --conv-mode $CONV_MODE \
+        $(if [ -n "$TOKEN_SCALE" ]; then echo "--matryoshka_vis_token_scale $TOKEN_SCALE"; fi) &
 done
 
 wait

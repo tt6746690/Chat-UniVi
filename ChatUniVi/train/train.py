@@ -75,7 +75,7 @@ class ModelArguments:
     sample_ratios_spatial: Optional[List[int]] = field(default=None)
     sample_ratios_video: Optional[List[int]] = field(default=None)
     sample_ratios: Optional[List[int]] = field(default=None)
-    coord_weights: Optional[List[float]] = field(default=None)
+    coord_weights: Optional[str] = field(default=None)
     token_orderings: Optional[List[str]] = field(default=None)
     token_ordering: Optional[str] = field(default=None)
     prune_ratios_spatial: Optional[List[int]] = field(default=None)
@@ -1029,6 +1029,7 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
+    model_args.coord_weights = eval(model_args.coord_weights) # str -> List[List[float]]
 
     # wpq: overwrite `model_config` kvs with `model_args`, 
     # then make sure `model_args` contain default values from `model_config`.
@@ -1054,7 +1055,6 @@ def train():
                 'training_args': asdict(training_args),
             }, f, indent=4)
         print(f'Saving args dict to {args_dict_path}')
-        
 
     random.seed(training_args.seed)
     os.environ['PYTHONHASHSEED'] = str(training_args.seed)

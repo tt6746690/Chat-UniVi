@@ -799,7 +799,7 @@ class ChatUniViMetaForCausalLM(ABC):
             if not getattr(self, method_name):
                 raise ValueError(f"[ChatUniViMetaForCausalLM.project] {method_name} not supported.")
             if (cluster_type == 'v4' and not matryoshka_vis_token_scale) or (cluster_type != 'v4' and matryoshka_vis_token_scale):
-                raise ValueError('Only use `matryoshka_vis_token_scale` when `cluster_type="v4"`.')
+                raise ValueError('Only use `matryoshka_vis_token_scale` when `cluster_type="v4"`. but got matryoshka_vis_token_scale={None} and cluster_type={cluster_type}')
             
             if cluster_type == "v1":
                 image_features = getattr(self, method_name)(image_features, input_type=input_type)
@@ -1090,6 +1090,7 @@ class ChatUniViMetaForCausalLM(ABC):
         return image_features
 
     def router_forward(self, encode_images_output, batch_idx_list=[], input_ids=None):
+
         if self.get_model().is_m3_moe:
             kvs = parse_kv_from_string(self.get_model().config.config['moe'])
             feature_type = kvs['ft']
@@ -1405,8 +1406,11 @@ class ChatUniViMetaForCausalLM(ABC):
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
                 assert(attention_mask.shape == new_input_embeds.shape[:2])
 
-        # [(1, K), ...] -> (B, K)
-        gating_prob = torch.cat(gating_prob_list, dim=0)
+        if all(x is not None for x in gating_prob_list):
+            # [(1, K), ...] -> (B, K)
+            gating_prob = torch.cat(gating_prob_list, dim=0)
+        else:
+            gating_prob = None
 
         return None, attention_mask, past_key_values, new_input_embeds, new_labels, new_position_ids, gating_prob
 

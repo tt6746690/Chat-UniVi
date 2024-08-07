@@ -84,7 +84,6 @@ def eval_model(args):
 
             # wpq: since `_get_rawvideo_dec` is modified, need to concat images before feeding into `.generate`
             images = torch.stack(video_frames).half().to('cuda')
-            print(images.shape, images.device)
             with torch.inference_mode():
                 output_ids = model.generate(
                     input_ids,
@@ -95,7 +94,9 @@ def eval_model(args):
                     num_beams=args.num_beams,
                     max_new_tokens=1024,
                     use_cache=True,
-                    stopping_criteria=[stopping_criteria])
+                    stopping_criteria=[stopping_criteria],
+                    matryoshka_vis_token_scale = getattr(args, "matryoshka_vis_token_scale", None),
+                )
 
 
             input_token_len = input_ids.shape[1]
@@ -137,6 +138,7 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--model_use", type=str, default="BASE")
+    parser.add_argument("--matryoshka_vis_token_scale", type=str, default=None)
     args = parser.parse_args()
 
     eval_model(args)

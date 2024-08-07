@@ -41,7 +41,8 @@ if [[ ! -f "$SAVE_DIR/answers-generic/merge.jsonl" || \
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0.2 \
-            --conv-mode $CONV_MODE &
+            --conv-mode $CONV_MODE \
+            $(if [ -n "$TOKEN_SCALE" ]; then echo "--matryoshka_vis_token_scale $TOKEN_SCALE"; fi) &
         # temporal
         CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_video_general \
             --model-path $CKPT \
@@ -51,7 +52,8 @@ if [[ ! -f "$SAVE_DIR/answers-generic/merge.jsonl" || \
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0.2 \
-            --conv-mode $CONV_MODE &
+            --conv-mode $CONV_MODE \
+            $(if [ -n "$TOKEN_SCALE" ]; then echo "--matryoshka_vis_token_scale $TOKEN_SCALE"; fi) &
         # consistency
         CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m ChatUniVi.eval.model_video_consistency \
             --model-path $CKPT \
@@ -61,7 +63,8 @@ if [[ ! -f "$SAVE_DIR/answers-generic/merge.jsonl" || \
             --num-chunks $CHUNKS \
             --chunk-idx $IDX \
             --temperature 0.2 \
-            --conv-mode $CONV_MODE &
+            --conv-mode $CONV_MODE \
+            $(if [ -n "$TOKEN_SCALE" ]; then echo "--matryoshka_vis_token_scale $TOKEN_SCALE"; fi) &
     done
 
     wait

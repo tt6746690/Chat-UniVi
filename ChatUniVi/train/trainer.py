@@ -129,11 +129,11 @@ class ChatUniViTrainer(Trainer):
         with self.compute_loss_context_manager():
             loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
 
+        log_dict = {}
 
         ## wpq: log per-expert LM loss
         if outputs.losses is not None: # m3 type training
             if self.is_world_process_zero() and 'wandb' in self.args.report_to:
-                log_dict = {}
                 losses_lm_reduced = torch.mean(outputs.losses_lm, 0) # (1,) unweighted lm loss
                 for k in range(outputs.losses.numel()):
                     log_dict.update({f'moe/loss_lm_{k}': losses_lm_reduced[k].item()})
@@ -265,7 +265,8 @@ class ChatUniViTrainer(Trainer):
 
          # log once/batch if assume no gradient accumulation.
         if self.is_world_process_zero() and 'wandb' in self.args.report_to:
-            wandb.log(log_dict)
+            if log_dict:
+                wandb.log(log_dict)
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
