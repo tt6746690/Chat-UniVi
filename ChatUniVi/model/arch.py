@@ -461,8 +461,7 @@ class ChatUniViMetaForCausalLM(ABC):
         if self.get_model().use_cluster and \
             self.get_model().cluster_type == 'v4' and \
             hasattr(self.get_model().config, 'config') and \
-            self.get_model().config.config.get('matryoshka_vis_token_scale', None) is not None and \
-            self.get_model().config.config.get('moe', None) is not None:
+            self.get_model().config.config.get('matryoshka_vis_token_scale', None) is not None:
             return self.encode_images_with_attn(images)
         else:
             return self.encode_images_original(images)

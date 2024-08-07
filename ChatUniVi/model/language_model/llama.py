@@ -165,7 +165,7 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
     ) -> Union[Tuple, CausalLMOutputWithPastWithGatingProb]:
 
 
-        if self.training and hasattr(self.config, "config") and self.config.config['matryoshka_vis_token_scale'] is not None:
+        if self.training and hasattr(self.config, "config") and self.config.config.get('matryoshka_vis_token_scale', None) is not None:
             from rosemary import parse_kv_from_string, create_string_from_kv
             matryoshka_vis_token_scale = self.config.config['matryoshka_vis_token_scale']
             kvs = parse_kv_from_string(matryoshka_vis_token_scale)
