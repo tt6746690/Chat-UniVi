@@ -65,7 +65,7 @@ class ModelArguments:
     use_cluster: Optional[bool] = field(default=None)
     freeze: Optional[bool] = field(default=None)
     mm_tune: Optional[bool] = field(default=None)
-    vision_tune: Optional[float] = field(default=None)
+    vision_tune: Optional[bool] = field(default=None)
     spatial_cluster_rate0: Optional[float] = field(default=None)
     spatial_cluster_rate1: Optional[float] = field(default=None)
     spatial_cluster_rate2: Optional[float] = field(default=None)
@@ -75,7 +75,7 @@ class ModelArguments:
     sample_ratios_spatial: Optional[List[int]] = field(default=None)
     sample_ratios_video: Optional[List[int]] = field(default=None)
     sample_ratios: Optional[List[int]] = field(default=None)
-    coord_weights: Optional[List[float]] = field(default=None)
+    coord_weights: Optional[str] = field(default=None)
     token_orderings: Optional[List[str]] = field(default=None)
     token_ordering: Optional[str] = field(default=None)
     prune_ratios_spatial: Optional[List[int]] = field(default=None)
@@ -1027,6 +1027,7 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
+    model_args.coord_weights = eval(model_args.coord_weights) if model_args.coord_weights else model_args.coord_weights # str -> List[List[float]]
 
     # wpq: overwrite `model_config` kvs with `model_args`, 
     # then make sure `model_args` contain default values from `model_config`.

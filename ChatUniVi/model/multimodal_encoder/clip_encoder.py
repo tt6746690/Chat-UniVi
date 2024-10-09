@@ -20,6 +20,9 @@ class CLIPVisionTower(nn.Module):
 
         if not delay_load:
             self.load_model()
+        elif hasattr(args, 'config') and args.config.get('vision_tune', False):
+            print(f'Checkpoint contains `vision_tower` weights: `vision_tune`: True.')
+            self.load_model()
         else:
             self.cfg_only = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
 
