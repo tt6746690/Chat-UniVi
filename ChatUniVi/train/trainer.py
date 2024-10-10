@@ -1,5 +1,6 @@
 import os
 import torch
+import transformers
 from transformers import Trainer
 from typing import Optional
 import torch.distributed as dist
@@ -31,30 +32,72 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
     return to_return
 
 
-## imports for exposing `training_steps`
 
-from transformers.utils import is_sagemaker_mp_enabled, is_apex_available
-if is_sagemaker_mp_enabled():
-    import smdistributed.modelparallel.torch as smp
-    from smdistributed.modelparallel import __version__ as SMP_VERSION
+if transformers.__version__ == '4.31.0':
+    ## imports for exposing `training_steps` 4.31.0
+    from transformers.utils import is_sagemaker_mp_enabled, is_apex_available
+    if is_sagemaker_mp_enabled():
+        import smdistributed.modelparallel.torch as smp
+        from smdistributed.modelparallel import __version__ as SMP_VERSION
 
-    IS_SAGEMAKER_MP_POST_1_10 = version.parse(SMP_VERSION) >= version.parse("1.10")
+        IS_SAGEMAKER_MP_POST_1_10 = version.parse(SMP_VERSION) >= version.parse("1.10")
 
-    from .trainer_pt_utils import smp_forward_backward, smp_forward_only, smp_gather, smp_nested_concat
-else:
-    IS_SAGEMAKER_MP_POST_1_10 = False
+        from .trainer_pt_utils import smp_forward_backward, smp_forward_only, smp_gather, smp_nested_concat
+    else:
+        IS_SAGEMAKER_MP_POST_1_10 = False
 
-if is_apex_available():
-    from apex import amp
+    if is_apex_available():
+        from apex import amp
 
-from transformers.modeling_utils import unwrap_model
-from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+    from transformers.modeling_utils import unwrap_model
+    from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+    from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+
+elif transformers.__version__ == '4.43.1':
+    ## import for exposing `training_steps` 4.43.1
+    from transformers.utils import is_accelerate_available, is_sagemaker_mp_enabled
+    from transformers.training_args import OptimizerNames
+
+    if is_accelerate_available():
+        from accelerate.utils import (
+            is_mlu_available,
+            is_mps_available,
+            is_npu_available,
+            is_torch_version,
+            is_xpu_available,
+        )
+
+    if is_sagemaker_mp_enabled():
+        import smdistributed.modelparallel.torch as smp
+        from smdistributed.modelparallel import __version__ as SMP_VERSION
+
+        IS_SAGEMAKER_MP_POST_1_10 = version.parse(SMP_VERSION) >= version.parse("1.10")
+
+        from .trainer_pt_utils import smp_forward_backward
+    else:
+        IS_SAGEMAKER_MP_POST_1_10 = False
+
+elif transformers.__version__ == '4.45.2':
+    from transformers.utils import is_accelerate_available, is_sagemaker_mp_enabled
+    from transformers.training_args import OptimizerNames
+    from transformers.utils import (
+        is_torch_mlu_available,
+        is_torch_mps_available,
+        is_torch_musa_available,
+        is_torch_neuroncore_available,
+        is_torch_npu_available,
+        is_torch_xla_available,
+        is_torch_xpu_available,
+    )
+
+
+        
 
 
 class ChatUniViTrainer(Trainer):
+
     def _save_checkpoint(self, model, trial, metrics=None):
         if 0 and getattr(self.args, 'tune_mm_mlp_adapter', False):
-            from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
             checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
 
             run_dir = self._get_output_dir(trial=trial)
@@ -80,40 +123,116 @@ class ChatUniViTrainer(Trainer):
             super(ChatUniViTrainer, self)._save(output_dir, state_dict)
 
 
-    def compute_loss(self, model, inputs, return_outputs=False):
-        """
-        How the loss is computed by Trainer. By default, all models return the loss in the first element.
-
-        Subclass and override for custom behavior.
-        """
-        if self.label_smoother is not None and "labels" in inputs:
-            labels = inputs.pop("labels")
-        else:
-            labels = None
-        outputs = model(**inputs)
-        # Save past state if it exists
-        # TODO: this needs to be fixed and made cleaner later.
-        if self.args.past_index >= 0:
-            self._past = outputs[self.args.past_index]
-
-        if labels is not None:
-            if unwrap_model(model)._get_name() in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.values():
-                loss = self.label_smoother(outputs, labels, shift_labels=True)
-            else:
-                loss = self.label_smoother(outputs, labels)
-        else:
-            if isinstance(outputs, dict) and "loss" not in outputs:
-                raise ValueError(
-                    "The model did not return a loss from the inputs, only the following keys: "
-                    f"{','.join(outputs.keys())}. For reference, the inputs it received are {','.join(inputs.keys())}."
-                )
-            # We don't use .loss here since the model may return tuples instead of ModelOutput.
-            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-
-        return (loss, outputs) if return_outputs else loss
-    
-
     def training_step(self, model, inputs):
+
+        if transformers.__version__ == '4.31.0':
+            return self.training_step_v4_31_0(model, inputs)
+        elif transformers.__version__ == '4.43.1':
+            return self.training_step_v4_43_1(model, inputs)
+        elif transformers.__version__ == '4.45.2':
+            return self.training_step_v4_45_2(model, inputs)
+
+
+    def training_step_v4_45_2(self, model, inputs):
+        model.train()
+        if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
+            self.optimizer.train()
+
+        inputs = self._prepare_inputs(inputs)
+        if is_sagemaker_mp_enabled():
+            loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps)
+            return loss_mb.reduce_mean().detach().to(self.args.device)
+
+        with self.compute_loss_context_manager():
+            loss = self.compute_loss(model, inputs)
+
+        del inputs
+        if (
+            self.args.torch_empty_cache_steps is not None
+            and self.state.global_step % self.args.torch_empty_cache_steps == 0
+        ):
+            if is_torch_xpu_available():
+                torch.xpu.empty_cache()
+            elif is_torch_mlu_available():
+                torch.mlu.empty_cache()
+            elif is_torch_musa_available():
+                torch.musa.empty_cache()
+            elif is_torch_npu_available():
+                torch.npu.empty_cache()
+            elif is_torch_mps_available(min_version="2.0"):
+                torch.mps.empty_cache()
+            else:
+                torch.cuda.empty_cache()
+
+        kwargs = {}
+
+        # For LOMO optimizers you need to explicitly use the learnign rate
+        if self.args.optim in [OptimizerNames.LOMO, OptimizerNames.ADALOMO]:
+            kwargs["learning_rate"] = self._get_learning_rate()
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+        if self.use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            self.accelerator.backward(loss, **kwargs)
+
+        return loss.detach() / self.args.gradient_accumulation_steps
+
+
+
+    def training_step_v4_43_1(self, model, inputs):
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+        if is_sagemaker_mp_enabled():
+            loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps)
+            return loss_mb.reduce_mean().detach().to(self.args.device)
+
+        # wpq: to get `ModelOutputs` instead of tuple.
+        inputs.update({'return_dict': True})
+
+        with self.compute_loss_context_manager():
+            loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+
+        loss = self.compute_custom_loss(loss, outputs)
+
+        del inputs
+        if (
+            self.args.torch_empty_cache_steps is not None
+            and self.state.global_step % self.args.torch_empty_cache_steps == 0
+        ):
+            if is_xpu_available():
+                torch.xpu.empty_cache()
+            elif is_mlu_available():
+                torch.mlu.empty_cache()
+            elif is_npu_available():
+                torch.npu.empty_cache()
+            elif is_torch_version(">=", "2.0") and is_mps_available():
+                torch.mps.empty_cache()
+            else:
+                torch.cuda.empty_cache()
+
+        kwargs = {}
+
+        # For LOMO optimizers you need to explicitly use the learnign rate
+        if self.args.optim in [OptimizerNames.LOMO, OptimizerNames.ADALOMO]:
+            kwargs["learning_rate"] = self._get_learning_rate()
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+        if self.use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            self.accelerator.backward(loss, **kwargs)
+
+        return loss.detach() / self.args.gradient_accumulation_steps
+
+
+    def training_step_v4_31_0(self, model, inputs):
         """reference: https://github.com/huggingface/transformers/blob/v4.31.0/src/transformers/trainer.py#L2628
         """
         model.train()
@@ -128,6 +247,25 @@ class ChatUniViTrainer(Trainer):
 
         with self.compute_loss_context_manager():
             loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+
+        loss = self.compute_custom_loss(loss, outputs)
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+        if self.do_grad_scaling:
+            self.scaler.scale(loss).backward()
+        elif self.use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            self.accelerator.backward(loss)
+
+        return loss.detach() / self.args.gradient_accumulation_steps
+
+
+
+    def compute_custom_loss(self, loss, outputs):
 
         log_dict = {}
 
@@ -268,18 +406,7 @@ class ChatUniViTrainer(Trainer):
             if log_dict:
                 wandb.log(log_dict)
 
-        if self.args.n_gpu > 1:
-            loss = loss.mean()  # mean() to average on multi-gpu parallel training
-
-        if self.do_grad_scaling:
-            self.scaler.scale(loss).backward()
-        elif self.use_apex:
-            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            self.accelerator.backward(loss)
-
-        return loss.detach() / self.args.gradient_accumulation_steps
+        return loss
 
 
 

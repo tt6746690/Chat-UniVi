@@ -391,11 +391,9 @@ conv_llava_llama_3 = Conversation(
     offset=0,
     sep="<|eot_id|>",
     sep_style=SeparatorStyle.LLAMA_3,
-    # tokenizer_id="meta-llama/Meta-Llama-3.1-8B-Instruct",
     tokenizer_id="meta-llama/Meta-Llama-3-8B-Instruct",
-    # tokenizer=safe_load_tokenizer("meta-llama/Meta-Llama-3.1-8B-Instruct"),
-    # tokenizer=safe_load_tokenizer("/fsx/wpq/.results/baselines/meta-llama/Llama-3.1-8B-Instruct"),
-    tokenizer=safe_load_tokenizer("/fsx/wpq/.results/baselines/unsloth/llama-3-8b-Instruct"),
+    # tokenizer=safe_load_tokenizer("meta-llama/Meta-Llama-3-8B-Instruct"),
+    tokenizer=safe_load_tokenizer("/fsx/wpq/.results/baselines/meta-llama/Llama-3.1-8B"),
     stop_token_ids=[128009],
 )
 

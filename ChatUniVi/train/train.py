@@ -36,6 +36,10 @@ import random
 import numpy as np
 from ChatUniVi.model.dataloader import _get_rawvideo_dec
 
+from packaging import version
+import tokenizers
+IS_TOKENIZER_GREATER_THAN_0_14 = version.parse(tokenizers.__version__) >= version.parse("0.14")
+
 local_rank = None
 
 
@@ -439,8 +443,10 @@ def preprocess_llama_2(
 
             cur_len += round_len
 
-        if tokenizer.eos_token == tokenizer.pad_token:
-            cur_len += 1
+        ## not in llava-next, so remove
+        #  https://github.com/LLaVA-VL/LLaVA-NeXT/blob/main/llava/train/train.py#L468
+        # if tokenizer.eos_token == tokenizer.pad_token:
+        #     cur_len += 1
 
         target[cur_len:] = IGNORE_INDEX
 
@@ -496,8 +502,9 @@ def preprocess_v1(
     targets = input_ids.clone()
     assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
 
+
     # Mask targets
-    round_len_list = []
+    # round_len_list = []
     sep = conv.sep + conv.roles[1] + ": "
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
@@ -521,12 +528,18 @@ def preprocess_v1(
                 round_len = len(tokenizer(rou).input_ids)
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
+            ## handles tokenization mismatch from using new versions of tokenizer
+            ## copied from https://github.com/LLaVA-VL/LLaVA-NeXT/blob/main/llava/train/train.py#L781
+            if i != 0 and (hasattr(tokenizer, 'legacy') and not tokenizer.legacy) and IS_TOKENIZER_GREATER_THAN_0_14:
+                round_len -= 1
+                instruction_len -= 1
+
             target[cur_len: cur_len + instruction_len] = IGNORE_INDEX
             # print("rou:", rou)
             # print(round_len, instruction_len)
             # print(len(tokenizer(rou).input_ids), len(tokenizer_image_token(rou, tokenizer)))
             cur_len += round_len
-            round_len_list.append(round_len)
+            # round_len_list.append(round_len)
         target[cur_len:] = IGNORE_INDEX
 
         if cur_len < tokenizer.model_max_length:
@@ -725,6 +738,94 @@ def preprocess_phi(
     )
 
 
+
+def preprocess_llama3(
+    sources,
+    tokenizer: transformers.PreTrainedTokenizer,
+    has_image: bool = False,
+    max_len=2048,
+    system_message: str = "You are a helpful language and vision assistant. You are able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language.",
+) -> Dict:
+    # roles = {"human": "<|start_header_id|>user<|end_header_id|>", "gpt": "<|start_header_id|>assistant<|end_header_id|>"}
+    roles = {"human": "user", "gpt": "assistant"}
+
+    # Add image tokens to tokenizer as a special tokens
+    # Use a deepcopy of tokenizer so that we don't modify on the tokenizer
+    tokenizer = copy.deepcopy(tokenizer)
+    # When there is actually an image, we add the image tokens as a special token
+    if has_image:
+        tokenizer.add_tokens(["<image>"], special_tokens=True)
+    image_token_index = tokenizer.convert_tokens_to_ids("<image>")
+    bos_token_id = tokenizer.convert_tokens_to_ids("<|begin_of_text|>")
+    start_header_id = tokenizer.convert_tokens_to_ids("<|start_header_id|>")
+    end_header_id = tokenizer.convert_tokens_to_ids("<|end_header_id|>")
+    eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
+
+    unmask_tokens = ["<|begin_of_text|>", "<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>", "\n\n"]
+    unmask_tokens_idx = [tokenizer.convert_tokens_to_ids(tok) for tok in unmask_tokens]
+
+    # After update, calling tokenizer of llama3 will
+    # auto add bos id for the tokens. ヽ(｀⌒´)ﾉ
+    def safe_tokenizer_llama3(text):
+        input_ids = tokenizer(text).input_ids
+        if input_ids[0] == bos_token_id:
+            input_ids = input_ids[1:]
+        return input_ids
+
+    nl_tokens = tokenizer.convert_tokens_to_ids("\n\n")
+    # Apply prompt templates
+    input_ids, targets = [], []
+    for i, source in enumerate(sources):
+        if roles[source[0]["from"]] != roles["human"]:
+            source = source[1:]
+
+        input_id, target = [], []
+
+        # New version, use apply chat template
+        # Build system message for each sentence
+        input_id += tokenizer.apply_chat_template([{"role" : "system", "content" : system_message}])
+        target += [IGNORE_INDEX] * len(input_id)
+
+        for conv in source:
+            # Make sure llava data can load
+            try:
+                role = conv["role"]
+                content = conv["content"]
+            except:
+                role = conv["from"]
+                content = conv["value"]
+
+            role =  roles.get(role, role)
+            
+            conv = [{"role" : role, "content" : content}]
+            # First is bos token we don't need here
+            encode_id = tokenizer.apply_chat_template(conv)[1:]
+            input_id += encode_id
+            if role in ["user", "system"]:
+                target += [IGNORE_INDEX] * len(encode_id)
+            else:
+                target += encode_id
+        
+
+                    
+        assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
+        for idx, encode_id in enumerate(input_id):
+            if encode_id in unmask_tokens_idx:
+                target[idx] = encode_id
+            if encode_id == image_token_index:
+                input_id[idx] = IMAGE_TOKEN_INDEX
+        input_ids.append(input_id)
+        targets.append(target)
+    input_ids = torch.tensor(input_ids, dtype=torch.long)
+    targets = torch.tensor(targets, dtype=torch.long)
+
+    return dict(
+        input_ids=input_ids,  # tensor(bs x seq_len)
+        labels=targets,  # tensor(bs x seq_len)
+    )
+
+
+
 def preprocess(
         sources: Sequence[str],
         tokenizer: transformers.PreTrainedTokenizer,
@@ -747,6 +848,9 @@ def preprocess(
         return preprocess_v1(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version == "mpt":
         return preprocess_mpt(sources, tokenizer)
+    if conversation_lib.default_conversation.version == "llama_v3":
+        return preprocess_llama3(sources, tokenizer, has_image=has_image)
+    
     # add end signal and concatenate together
     conversations = []
     for source in sources:
@@ -1029,7 +1133,8 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
-    model_args.coord_weights = eval(model_args.coord_weights) # str -> List[List[float]]
+    if model_args.coord_weights is not None:
+        model_args.coord_weights = eval(model_args.coord_weights) # str -> List[List[float]]
 
     # wpq: overwrite `model_config` kvs with `model_args`, 
     # then make sure `model_args` contain default values from `model_config`.
@@ -1181,6 +1286,18 @@ def train():
         conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
     else:
         tokenizer.pad_token = tokenizer.unk_token
+
+        # apply instruct model's tokenizer chat template to base model (for llama >3 only)
+        if model_args.version == 'llama_3' and '<|finetune_right_pad_id|>' in tokenizer.get_vocab():
+            llama_3_tokenizer = transformers.AutoTokenizer.from_pretrained(
+                '/fsx/wpq/.results/baselines/unsloth/llama-3-8b-Instruct' # llama-3
+                # '/fsx/wpq/.results/baselines/meta-llama/Llama-3.1-8B-Instruct' # llama-3.1
+            )
+            tokenizer.chat_template = llama_3_tokenizer.chat_template
+            tokenizer.eos_token = llama_3_tokenizer.eos_token # eos token after SFT
+            tokenizer.pad_token =  '<|finetune_right_pad_id|>'
+
+
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
