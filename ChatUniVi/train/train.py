@@ -1288,7 +1288,7 @@ def train():
         tokenizer.pad_token = tokenizer.unk_token
 
         # apply instruct model's tokenizer chat template to base model (for llama >3 only)
-        if model_args.version == 'llama_3' and '<|finetune_right_pad_id|>' in tokenizer.get_vocab():
+        if model_args.version == 'llama_v3' and '<|finetune_right_pad_id|>' in tokenizer.get_vocab():
             llama_3_tokenizer = transformers.AutoTokenizer.from_pretrained(
                 '/fsx/wpq/.results/baselines/unsloth/llama-3-8b-Instruct' # llama-3
                 # '/fsx/wpq/.results/baselines/meta-llama/Llama-3.1-8B-Instruct' # llama-3.1
@@ -1296,7 +1296,6 @@ def train():
             tokenizer.chat_template = llama_3_tokenizer.chat_template
             tokenizer.eos_token = llama_3_tokenizer.eos_token # eos token after SFT
             tokenizer.pad_token =  '<|finetune_right_pad_id|>'
-
 
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
