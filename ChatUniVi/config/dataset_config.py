@@ -73,7 +73,8 @@ REASONING_CLEVRER_MC = {
 }
 
 VQA_WEBVID_QA = {
-    "annotation_path": f"{DATASET_DIR}/annotations/vqa_webvid_qa.json",
+    # "annotation_path": f"{DATASET_DIR}/annotations/vqa_webvid_qa.json",
+    "annotation_path": f"{DATASET_DIR}/annotations/vqa_webvid_qa_existfiltered.json",
     "data_path": f"{DATASET_DIR}/instruction_tuning/webvid",
 }
 
