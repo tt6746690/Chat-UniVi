@@ -22,6 +22,7 @@ def read_jsonl(file):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="question-answer-generation-using-gpt-3")
+    parser.add_argument("--model", required=True, type=str, default='gpt-3.5-turbo')
     parser.add_argument("--pred_path", required=True, help="The path to file containing prediction.")
     parser.add_argument("--output_dir", required=True, help="The path to save annotation json files.")
     parser.add_argument("--output_json", required=True, help="The path to save annotation final combined json file.")
@@ -31,7 +32,7 @@ def parse_args():
     return args
 
 
-def annotate(prediction_set, caption_files, output_dir):
+def annotate(prediction_set, caption_files, output_dir, model):
     """
     Evaluates question and answer pairs using GPT-3 and
     returns a score for detailed orientation.
@@ -48,7 +49,7 @@ def annotate(prediction_set, caption_files, output_dir):
                 # wpq: update openai>1.0.0
                 # completion = openai.ChatCompletion.create(
                 completion = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
+                    model=model,
                     messages=[
                         {
                             "role": "system",
@@ -181,7 +182,7 @@ def main():
             # Split tasks into parts.
             part_len = len(incomplete_files) // num_tasks
             all_parts = [incomplete_files[i:i + part_len] for i in range(0, len(incomplete_files), part_len)]
-            task_args = [(prediction_set, part, args.output_dir) for part in all_parts]
+            task_args = [(prediction_set, part, args.output_dir, args.model) for part in all_parts]
 
             # Use a pool of workers to process the files in parallel.
             with Pool() as pool:

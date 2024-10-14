@@ -18,6 +18,9 @@ MAX_IMAGE_LENGTH=64
 CHATUNIVI_REPO_DIR=/fsx/wpq/github/metasummer2024/external/Chat-UniVi
 VIDEO_FOLDER=/fsx/wpq/.data/chatunivi/eval/Chat-UniVi-Eval/Test_Videos
 NUM_TASKS_GPT_EVAL=3
+# LLM_JUDGE_MODEL=gpt-3.5-turbo
+LLM_JUDGE_MODEL=gpt-4o-mini-2024-07-18
+
 
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
@@ -101,32 +104,37 @@ python -m ChatUniVi.eval.evaluate.evaluate_benchmark_1_correctness \
     --pred_path $SAVE_DIR/answers-generic/merge.jsonl \
     --output_dir $SAVE_DIR/correctness \
     --output_json $SAVE_DIR/correctness/merge.jsonl \
-    --num_tasks $NUM_TASKS_GPT_EVAL
+    --num_tasks $NUM_TASKS_GPT_EVAL \
+    --model $LLM_JUDGE_MODEL
 
 echo "Category: Detail Orientation"
 python -m ChatUniVi.eval.evaluate.evaluate_benchmark_2_detailed_orientation \
     --pred_path $SAVE_DIR/answers-generic/merge.jsonl \
     --output_dir $SAVE_DIR/detailed_orientation \
     --output_json $SAVE_DIR/detailed_orientation/merge.jsonl \
-    --num_tasks $NUM_TASKS_GPT_EVAL
+    --num_tasks $NUM_TASKS_GPT_EVAL \
+    --model $LLM_JUDGE_MODEL
 
 echo "Category: Contextual Understanding"
 python -m ChatUniVi.eval.evaluate.evaluate_benchmark_3_context \
     --pred_path $SAVE_DIR/answers-generic/merge.jsonl \
     --output_dir $SAVE_DIR/context \
     --output_json $SAVE_DIR/context/merge.jsonl \
-    --num_tasks $NUM_TASKS_GPT_EVAL
+    --num_tasks $NUM_TASKS_GPT_EVAL \
+    --model $LLM_JUDGE_MODEL
 
 echo "Category: Temporal Understanding"
 python -m ChatUniVi.eval.evaluate.evaluate_benchmark_4_temporal \
     --pred_path $SAVE_DIR/answers-temporal/merge.jsonl \
     --output_dir $SAVE_DIR/temporal \
     --output_json $SAVE_DIR/temporal/merge.jsonl \
-    --num_tasks $NUM_TASKS_GPT_EVAL
+    --num_tasks $NUM_TASKS_GPT_EVAL \
+    --model $LLM_JUDGE_MODEL
 
 echo "Category: Consistency"
 python -m ChatUniVi.eval.evaluate.evaluate_benchmark_5_consistency \
     --pred_path $SAVE_DIR/answers-consistency/merge.jsonl \
     --output_dir $SAVE_DIR/consistency \
     --output_json $SAVE_DIR/consistency/merge.jsonl \
-    --num_tasks $NUM_TASKS_GPT_EVAL
+    --num_tasks $NUM_TASKS_GPT_EVAL \
+    --model $LLM_JUDGE_MODEL

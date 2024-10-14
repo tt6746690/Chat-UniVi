@@ -27,7 +27,7 @@ def _get_rawvideo_dec(video_path, image_processor, max_frames=64, image_resoluti
             end_time = start_time + 1
 
     if os.path.exists(video_path):
-        vreader = VideoReader(video_path, ctx=cpu(0))
+        vreader = VideoReader(video_path, num_threads=1, ctx=cpu(0))
     else:
         print(video_path)
         raise FileNotFoundError
