@@ -6,7 +6,7 @@ set -x
 CKPT=$1
 TOKEN_SCALE=$2
 SAVE_DIR=$3
-CONV_MODE=v1
+CONV_MODE=$4
 
 EVAL_DATA_DIR=/fsx/wpq/.data/eval/llava-bench-in-the-wild
 LLAVA_REPO_DIR=/fsx/wpq/github/metasummer2024/external/LLaVA

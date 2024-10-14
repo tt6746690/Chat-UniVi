@@ -6,7 +6,7 @@ set -x
 CKPT=$1
 TOKEN_SCALE=$2
 SAVE_DIR=$3
-CONV_MODE=v1
+CONV_MODE=$4
 
 SPLIT="llava_gqa_testdev_balanced"
 GQADIR="/fsx/wpq/.data/eval/gqa"

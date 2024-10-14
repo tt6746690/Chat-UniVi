@@ -1,125 +1,116 @@
-# wpq: modify data path
-PATH = '/fsx/wpq/.data/chatunivi/'
+# reference:  https://github.com/mbzuai-oryx/VideoGPT-plus/blob/main/videogpt_plus/config/dataset_config.py
 
+DATASET_DIR = '/fsx/wpq/.data/videogptplus'
 
-Pretrain = {
-    "chat_path": f"{PATH}/CC3M-595K/chat.json",
-    "CC3M": f"{PATH}/CC3M-595K",
-}
-
-VIT = {
-    "chat_path": f"{PATH}/llava_instruct_150k.json",
-    "COCO2017": f"{PATH}/COCO2017/train2017",
-}
-
-MIMIC_imageonly = {
-    "chat_path": f"{PATH}/MIMIC-IT-imageonly.json",
-    "CDG": f"{PATH}/CGD/images",
-    "LA": f"{PATH}/LA/images",
-    "SD": f"{PATH}/SD/images",
+CC3M_595K = {
+    "annotation_path": f"{DATASET_DIR}/pretraining/CC3M-595K/chat.json",
+    "data_path": f"{DATASET_DIR}/pretraining/CC3M-595K",
 }
 
 COCO_CAP = {
-    "chat_path": f"{PATH}/COCO/coco_cap_chat.json",
-    "COCO2014": f"{PATH}/COCO2014/train2014",
+    "annotation_path": f"{DATASET_DIR}/pretraining/COCO/coco_cap_chat.json",
+    "data_path": f"{DATASET_DIR}/pretraining/COCO/train2014",
 }
 
 COCO_REG = {
-    "chat_path": f"{PATH}/COCO/coco_reg_chat.json",
-    "COCO2014": f"{PATH}/COCO2014/train2014",
+    "annotation_path": f"{DATASET_DIR}/pretraining/COCO/coco_reg_chat.json",
+    "data_path": f"{DATASET_DIR}/pretraining/COCO/train2014",
 }
 
 COCO_REC = {
-    "chat_path": f"{PATH}/COCO/coco_rec_chat.json",
-    "COCO2014": f"{PATH}/COCO2014/train2014",
+    "annotation_path": f"{DATASET_DIR}/pretraining/COCO/coco_rec_chat.json",
+    "data_path": f"{DATASET_DIR}/pretraining/COCO/train2014",
 }
 
-VIDEO = {
-    "chat_path": f"{PATH}/video_chat.json",
-    "VIDEO": f"{PATH}/Activity_Videos",
+CONV_VideoChatGPT = {
+    "annotation_path": f"{DATASET_DIR}/annotations/conversation_videochatgpt.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/Activity_Videos",
 }
 
-SQA = {
-    "chat_path": f"{PATH}/llava_train_QCM-LEA.json",
-    "ScienceQA": f"{PATH}/scienceqa/train",
+VCG_HUMAN = {
+    "annotation_path": f"{DATASET_DIR}/annotations/vcg_human_annotated.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/Activity_Videos",
 }
 
-Pretrain_valley_llava = {
-    "chat_path": f"{PATH}/valley_llavaimage.json",
-    "valley": f"{PATH}/Data",
-    "llava": f"{PATH}/Data",  # from llava v1.5
+VCG_PLUS_112K = {
+    "annotation_path": f"{DATASET_DIR}/annotations/vcg-plus_112K.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/Activity_Videos",
 }
 
-LLaVA = {
-    "chat_path": f"{PATH}/llavaimage_tune.json",
-    "llava": f"{PATH}/Data",  # from llava v1.5
+CAPTION_VIDEOCHAT = {
+    "annotation_path": f"{DATASET_DIR}/annotations/caption_videochat.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/webvid",
+}
+
+CLASSIFICATION_K710 = {
+    "annotation_path": f"{DATASET_DIR}/annotations/classification_k710.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/k710",
+}
+
+CLASSIFICATION_SSV2 = {
+    "annotation_path": f"{DATASET_DIR}/annotations/classification_ssv2.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/ssv2",
+}
+
+CONV_VideoChat1 = {
+    "annotation_path": f"{DATASET_DIR}/annotations/conversation_videochat1.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/videochat_it",
+}
+
+REASONING_NExTQA = {
+    "annotation_path": f"{DATASET_DIR}/annotations/reasoning_next_qa.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/NExTQA",
+}
+
+REASONING_CLEVRER_QA = {
+    "annotation_path": f"{DATASET_DIR}/annotations/reasoning_clevrer_qa.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/clevrer",
+}
+
+REASONING_CLEVRER_MC = {
+    "annotation_path": f"{DATASET_DIR}/annotations/reasoning_clevrer_mc.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/clevrer",
+}
+
+VQA_WEBVID_QA = {
+    "annotation_path": f"{DATASET_DIR}/annotations/vqa_webvid_qa.json",
+    "data_path": f"{DATASET_DIR}/instruction_tuning/webvid",
 }
 
 
-# "Pretrainv1.5": [Pretrain, Pretrain_valley_llava],
-# "FINETUNEv1.5": [VIT, VIDEO, LLaVA],
+## video-llava / chatunivi datasets
 
-# wpq: just add llava v1.5 dataset
-# each dictionary contains `chat_path` that points to the questions
-# the rest kv pairs are image folders.
+
+SFT_LLaVA = {
+    "annotation_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_tune.json",
+    "data_path": "/fsx/wpq/.data/videollava/",
+}
+
+SFT_LLaVA_200k = {
+    "annotation_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_tune_200k.json",
+    "data_path": "/fsx/wpq/.data/videollava/",
+}
 
 
 pretrain_valley = {
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_existfiltered.json",
-    "valley": "/fsx/wpq/.data/videollava/",
+    "annotation_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_existfiltered.json",
+    "data_path": "/fsx/wpq/.data/videollava/",
 }
 
 pretrain_valley_300k = {
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_existfiltered_300k.json",
-    "valley": "/fsx/wpq/.data/videollava/",
+    "annotation_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_existfiltered_300k.json",
+    "data_path": "/fsx/wpq/.data/videollava/",
 }
 
-pretrain_llava = {
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_existfiltered.json",
-    "llava": "/fsx/wpq/.data/videollava/",
-}
-
-pretrain_llava_300k = {
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_existfiltered_300k.json",
-    "llava": "/fsx/wpq/.data/videollava/",
-}
-
-Pretrain_valley_llava = {
+pretrain_valley_llava = {
     # filter the json to remove ones where valley videos are missing.
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_llavaimage_existfiltered.json",
-    # following two get image/video from Video-LLaVA hf dataset repo.
-    # should contain folder: `valley` 
-    "valley": "/fsx/wpq/.data/videollava/",
-    # should contain folder: `llava_image`
-    "llava": "/fsx/wpq/.data/videollava/",
+    "annotation_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_llavaimage_existfiltered.json",
+    "data_path": "/fsx/wpq/.data/videollava/",
 }
 
-Pretrain_valley_llava_300k = {
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_llavaimage_existfiltered_300k.json",
-    "valley": "/fsx/wpq/.data/videollava/",
-    "llava": "/fsx/wpq/.data/videollava/",
-}
-
-LLaVA = {
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_tune.json",
-    # following two get image/video from Video-LLaVA hf dataset repo.
-    # should contain folder: `llava_image_tune`
-    "llava": "/fsx/wpq/.data/videollava/",
-}
-
-LLaVA200k = {
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/llavaimage_tune_200k.json",
-    "llava": "/fsx/wpq/.data/videollava/",
+pretrain_valley_llava_300k = {
+    "annotation_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/v1.5_train_json/valley_llavaimage_existfiltered_300k.json",
+    "data_path": "/fsx/wpq/.data/videollava/",
 }
 
 
-VIDEO = {
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/Fine-tuning/VIDEO/video_chat.json",
-    "VIDEO": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/Fine-tuning/VIDEO/Activity_Videos",
-}
-
- 
-VIT = {
-    "chat_path": "/fsx/wpq/.data/chatunivi/Chat-UniVi-Instruct/Fine-tuning/VIT/llava_instruct_150k.json",
-    "COCO2017": "/datasets01/COCO/022719/train2017",
-}

@@ -12,7 +12,7 @@ trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
 CKPT=$1
 TOKEN_SCALE=$2
 SAVE_DIR=$3
-CONV_MODE=v1
+CONV_MODE=$4
 
 MAX_IMAGE_LENGTH=64
 CHATUNIVI_REPO_DIR=/fsx/wpq/github/metasummer2024/external/Chat-UniVi

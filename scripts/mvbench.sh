@@ -10,7 +10,7 @@ trap 'echo "Error caught, exiting all processes..."; kill 0; exit 1' ERR
 CKPT=$1
 TOKEN_SCALE=$2
 SAVE_DIR=$3
-CONV_MODE=v1
+CONV_MODE=$4
 
 MAX_IMAGE_LENGTH=64 # default=16 used by mvbench's paper. but I'll keep at 64 since it's the number used for training.
 EVAL_DATA_DIR=/fsx/wpq/.data/chatunivi/eval/MVBench

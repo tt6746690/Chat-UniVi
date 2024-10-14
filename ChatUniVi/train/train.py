@@ -880,6 +880,7 @@ def preprocess(
     return dict(input_ids=input_ids, labels=targets)
 
 
+
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
@@ -890,26 +891,22 @@ class LazySupervisedDataset(Dataset):
         dataset_list = DataConfig[str(data_args.dataset_use)]
         print(dataset_list)
 
-        self.max_length = MAX_IMAGE_LENGTH
         list_data_dict = []
-        self.folder_dict = {}
-        for i in dataset_list:
-            list_data_dict += json.load(open(i["chat_path"], "r"))
-
-            image_folder = [folder for folder in i if folder != "chat_path"]
-
-            for folder in image_folder:
-                if folder not in self.folder_dict:
-                    self.folder_dict[folder] = i[folder]
+        for data in dataset_list:
+            annotations = json.load(open(data["annotation_path"], "r"))
+            for ann in annotations:
+                ann['data_path'] = data['data_path']
+            list_data_dict += annotations
 
         random.seed(0) # wpq: make sure the ordering is the same 
         random.shuffle(list_data_dict)
 
-        # wpq
+        # wpq: take data subset
         if data_args.train_size is not None:
             list_data_dict = list_data_dict[:data_args.train_size]
 
-        rank0_print("Formatting inputs...Skip in lazy mode")
+        rank0_print(f"Total training samples: {len(list_data_dict)}")
+
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.data_args = data_args
@@ -920,8 +917,9 @@ class LazySupervisedDataset(Dataset):
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         try:
             data_dict = self._get_item(i)
-        except:
-            raise ValueError(f"[LazySupervisedDataset] Error loading i={i} example:\t{self.list_data_dict[i]}")
+        except Exception as err:
+            print(f"[LazySupervisedDataset] Error loading i={i} example:\t{self.list_data_dict[i]}")
+            raise err
         return data_dict
 
     def _get_item(self, i):
@@ -932,35 +930,10 @@ class LazySupervisedDataset(Dataset):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
         if 'image' in sources[0]:
+            image_folder = self.list_data_dict[i]['data_path']
             image_file = self.list_data_dict[i]['image']
 
             file = image_file[0] if type(image_file) is list else image_file
-
-            if "llava_image" in file:
-                image_folder = self.folder_dict['llava']
-            elif "\\" in file:
-                image_folder = self.folder_dict['ScienceQA']
-            elif "CGD" in file:
-                image_folder = self.folder_dict['CDG']
-            elif "DC" in file:
-                image_folder = self.folder_dict['DC']
-            elif "LA" in file:
-                image_folder = self.folder_dict['LA']
-            elif "SD" in file:
-                image_folder = self.folder_dict['SD']
-            elif "SN" in file:
-                image_folder = self.folder_dict['SN']
-            elif "TVC" in file:
-                image_folder = self.folder_dict['TVC']
-            elif "VST" in file:
-                image_folder = self.folder_dict['VST']
-            elif "GCC" in file:
-                image_folder = self.folder_dict['CC3M']
-            elif "COCO_train2014" in file:
-                image_folder = self.folder_dict['COCO2014']
-            else:
-                image_folder = self.folder_dict['COCO2017']
-
             processor = self.data_args.image_processor
 
             if type(image_file) is list:
@@ -1015,12 +988,9 @@ class LazySupervisedDataset(Dataset):
                 has_image=True)
 
         elif "video" in sources[0]:
+            video_folder = self.list_data_dict[i]['data_path']
             video_file = self.list_data_dict[i]['video']
 
-            if "valley" in video_file:
-                video_folder = self.folder_dict['valley']
-            else:
-                video_folder = self.folder_dict['VIDEO']
             processor = self.data_args.image_processor
 
             if os.path.exists(os.path.join(video_folder, video_file)):
@@ -1069,6 +1039,7 @@ class LazySupervisedDataset(Dataset):
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
 
         return data_dict
+    
 
 
 @dataclass

@@ -35,24 +35,30 @@ for dict_name in dict_names:
         ModelConfig.update({finetune_type + '_' + dict_name.split('model_config_')[1]: d})
 
 
+DataConfig = {}
 
-DataConfig = {
-    "Pretrain": [Pretrain, COCO_CAP, COCO_REG, COCO_REC],
-    "SQA": [SQA],
-    "FINETUNE": [VIT, MIMIC_imageonly, VIDEO],
-    "Pretrainv1.5": [Pretrain, Pretrain_valley_llava],
-    "FINETUNEv1.5": [VIT, VIDEO, LLaVA],
-    'valley703k+llavalcs558k': [Pretrain_valley_llava],
-    'valleyllavalcs300k': [Pretrain_valley_llava_300k],
-    'vcg100k+llava665k': [VIDEO, LLaVA],
-    'vcg100k+llava200k': [VIDEO, LLaVA200k],
-    'vit150k+vcg100k+llava665k': [VIT, VIDEO, LLaVA],
-    # image only
-    'llavalcs': [pretrain_llava],
-    'llavalcs300k': [pretrain_llava_300k],
-    'llava': [LLaVA],
-    'llava200k': [LLaVA200k],
-    # video only
-    'valley300k': [pretrain_valley_300k],
-    'vcg100k': [VIDEO],
-}
+## chatunivi / video-llava
+DataConfig.update({
+    # pretrain (image only)
+    'llavalcs': [CC3M_595K],
+    # pretrain (video only)
+    'vcg100k': [pretrain_valley_300k],
+    # pretrain (mix)
+    'valley703k+llavalcs558k': [pretrain_valley_llava],
+    'valleyllavalcs300k': [pretrain_valley_llava_300k],
+    # sft (image only)
+    'llava': [SFT_LLaVA],
+    'llava200k': [SFT_LLaVA_200k],
+    # sft (video only)
+    'vcg100k': [CONV_VideoChatGPT],
+    # sft (mix)
+    'vcg100k+llava665k': [CONV_VideoChatGPT, SFT_LLaVA],
+    'vcg100k+llava200k': [CONV_VideoChatGPT, SFT_LLaVA_200k],
+})
+
+## videogpt+
+DataConfig.update({
+    'sft+videogptplus+all': [CONV_VideoChatGPT, VCG_HUMAN, VCG_PLUS_112K, CAPTION_VIDEOCHAT, CLASSIFICATION_K710, CLASSIFICATION_SSV2, CONV_VideoChat1, REASONING_NExTQA, REASONING_CLEVRER_QA, REASONING_CLEVRER_MC, VQA_WEBVID_QA],
+    "sft+videogptplus+vcgbench": [CONV_VideoChatGPT, VCG_HUMAN, VCG_PLUS_112K, CAPTION_VIDEOCHAT, CONV_VideoChat1, VQA_WEBVID_QA],
+    "sft+videogptplus+mvbench": [CLASSIFICATION_K710, CLASSIFICATION_SSV2, CONV_VideoChatGPT, REASONING_NExTQA, REASONING_CLEVRER_QA, REASONING_CLEVRER_MC, VQA_WEBVID_QA],
+})
