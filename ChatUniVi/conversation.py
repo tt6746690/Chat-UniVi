@@ -288,7 +288,8 @@ class Conversation:
         return ret
 
     def copy(self):
-        return Conversation(system=self.system, roles=self.roles, messages=[[x, y] for x, y in self.messages], offset=self.offset, sep_style=self.sep_style, sep=self.sep, sep2=self.sep2, version=self.version, tokenizer_id=self.tokenizer_id, tokenizer=self.tokenizer, stop_token_ids=[x for x in self.stop_token_ids])
+        stop_token_ids = [x for x in self.stop_token_ids] if self.stop_token_ids is not None else self.stop_token_ids
+        return Conversation(system=self.system, roles=self.roles, messages=[[x, y] for x, y in self.messages], offset=self.offset, sep_style=self.sep_style, sep=self.sep, sep2=self.sep2, version=self.version, tokenizer_id=self.tokenizer_id, tokenizer=self.tokenizer, stop_token_ids=stop_token_ids)
 
 
     def dict(self):

@@ -799,7 +799,7 @@ class ChatUniViMetaForCausalLM(ABC):
             if not getattr(self, method_name):
                 raise ValueError(f"[ChatUniViMetaForCausalLM.project] {method_name} not supported.")
             if (cluster_type == 'v4' and not matryoshka_vis_token_scale) or (cluster_type != 'v4' and matryoshka_vis_token_scale):
-                raise ValueError('Only use `matryoshka_vis_token_scale` when `cluster_type="v4"`. but got matryoshka_vis_token_scale={None} and cluster_type={cluster_type}')
+                raise ValueError(f'Only use `matryoshka_vis_token_scale` when `cluster_type="v4"`. but got matryoshka_vis_token_scale={None} and cluster_type={cluster_type}')
             
             if cluster_type == "v1":
                 image_features = getattr(self, method_name)(image_features, input_type=input_type)
